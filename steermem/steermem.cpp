@@ -54,7 +54,7 @@ struct cell_t {
     // capture (filled on first use)
     bool captured = false;
     std::vector<llama_token> ids;                  // the row's tokens
-    int l0 = 0;
+    int l0 = 0, l1 = 0;                            // the line span [l0, l1) pooled for the head and the trace
     std::map<int, std::vector<float>> st;          // layer -> [n * d]
     std::vector<float> keyemb;                     // [d]
 };
@@ -114,7 +114,7 @@ struct side_t {
     float emb_norm = 0.0f;
     std::vector<int> layers;
     std::map<int, float> scale;
-    int mem_seq = 128, mem_seq_cells = 4, mem_gen = 0, memtok = 8, key_window = 96, egroup = 1;
+    int mem_seq = 128, mem_seq_cells = 4, mem_gen = 0, memtok = 8, key_window = 96, egroup = 1, line_rule = 2;
     std::vector<float> memtag, seqtag, exptag;     // [d], [64*d], [8*d]
 };
 
@@ -130,6 +130,7 @@ static side_t load_side(const std::string & path) {
     s.mem_seq = u32("steermem.mem_seq", 128); s.mem_seq_cells = u32("steermem.mem_seq_cells", 4);
     s.mem_gen = u32("steermem.mem_gen", 0); s.memtok = u32("steermem.memtok", 8);
     s.key_window = u32("steermem.key_window", 96); s.egroup = u32("steermem.egroup", 1);
+    s.line_rule = u32("steermem.line_rule", 2);   // absent: a checkpoint from before trainer patch 79
     int64_t li = gguf_find_key(g, "steermem.layers");
     if (li >= 0) {
         const int32_t * arr = (const int32_t *) gguf_get_arr_data(g, li);
@@ -226,10 +227,19 @@ struct engine_t {
         c.ids = tok(row, true);
         if (c.ids.size() > 512) c.ids.resize(512);
         const int n = (int) c.ids.size();
-        // l0: after the second newline-bearing token
-        int nl = 0; c.l0 = 0;
-        for (int i = 0; i < n; ++i) { if (piece(c.ids[i]).find('\n') != std::string::npos) { if (++nl == 2) { c.l0 = i + 1; break; } } }
-        if (c.l0 >= n) c.l0 = 0;
+        // the line span [l0, l1). Rule 2 (the trainer today): after the second newline-bearing token to the
+        // end -- for a one-line cell that is "</cell>" alone. Rule 1: from after the header's newline through
+        // the closing tag's newline-bearing token, i.e. the content.
+        std::vector<int> nls;
+        for (int i = 0; i < n; ++i) if (piece(c.ids[i]).find('\n') != std::string::npos) nls.push_back(i);
+        c.l0 = 0; c.l1 = n;
+        if (line_rule == 1) {
+            if (!nls.empty()) c.l0 = nls[0] + 1;
+            if (nls.size() >= 2 && nls.back() + 1 > c.l0) c.l1 = nls.back() + 1;
+        } else if (nls.size() >= 2) {
+            c.l0 = nls[1] + 1;
+        }
+        if (c.l0 >= n) { c.l0 = 0; c.l1 = n; }
         float zero = 0.0f;
         llama_set_adapters_lora(cap, &lora, 1, &zero);            // adapter OFF for the capture (model.disable_adapter)
         llama_inject_clear(cap);
@@ -279,8 +289,9 @@ struct engine_t {
         for (int l : side.layers) {
             float * r = b.rec[l].data();
             const float * st = c.st[l].data();
-            const int span = std::max(1, n - c.l0);
-            for (int t = c.l0; t < n; ++t) for (int j = 0; j < d; ++j) r[j] += st[(size_t) t * d + j] / (float) span;
+            const int e1 = std::max(c.l0 + 1, std::min(n, c.l1));
+            const int span = e1 - c.l0;
+            for (int t = c.l0; t < e1; ++t) for (int j = 0; j < d; ++j) r[j] += st[(size_t) t * d + j] / (float) span;
         }
         // body
         for (int k = 0; k < nb; ++k) {
@@ -308,6 +319,7 @@ struct engine_t {
         return out;
     }
     // feed helpers -------------------------------------------------------------------
+    int line_rule = 2;                              // 2: after the second newline to the end (the trainer today); 1: the content between the header and the closing tag
     int kv_pos = 0;
     std::vector<llama_token> text;                  // every text token fed so far (the router's window)
     struct pending_inj { int layer; llama_pos pos; std::vector<float> v; };
@@ -387,7 +399,7 @@ struct engine_t {
 
 int main(int argc, char ** argv) {
     std::string model_path, lora_path, side_path, table_path, prompt;
-    int max_new = 64, threads = 6, memgen = -1, n_ctx = 4096;
+    int max_new = 64, threads = 6, memgen = -1, n_ctx = 4096, line_rule = 0;   // line_rule 0: follow the side file
     bool no_traces = false, quiet = false;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -396,6 +408,7 @@ int main(int argc, char ** argv) {
         else if (a == "--table") table_path = next(); else if (a == "--prompt") prompt = next(); else if (a == "--max-new") max_new = atoi(next().c_str());
         else if (a == "--threads") threads = atoi(next().c_str()); else if (a == "--memgen") memgen = atoi(next().c_str());
         else if (a == "--no-traces") no_traces = true; else if (a == "--quiet") quiet = true; else if (a == "--ctx") n_ctx = atoi(next().c_str());
+        else if (a == "--line-rule") line_rule = atoi(next().c_str());
         else { fprintf(stderr, "unknown arg %s\n", a.c_str()); return 1; }
     }
     if (model_path.empty() || side_path.empty() || table_path.empty() || prompt.empty()) { fprintf(stderr, "need --model --side --table --prompt\n"); return 1; }
@@ -406,6 +419,7 @@ int main(int argc, char ** argv) {
     llama_backend_init();
     engine_t E;
     E.side = load_side(side_path);
+    E.line_rule = line_rule > 0 ? line_rule : E.side.line_rule;
     if (memgen >= 0) E.side.mem_gen = memgen;
     if (no_traces) E.side.memtok = 0;
     llama_model_params mp = llama_model_default_params(); mp.n_gpu_layers = 0;
@@ -489,7 +503,7 @@ int main(int argc, char ** argv) {
     if (!quiet) fputs("\n", stdout);
     json summary = { { "generation", out }, { "prompt_tokens", (int) seed.size() }, { "blocks", E.blocks_fed }, { "traces", E.traces_fed }, { "kv_used", E.kv_pos },
                      { "cells", json::array() } };
-    for (auto * c : cands) summary["cells"].push_back({ { "key", c->key }, { "row_tokens", (int) c->ids.size() }, { "l0", c->l0 } });
+    for (auto * c : cands) summary["cells"].push_back({ { "key", c->key }, { "row_tokens", (int) c->ids.size() }, { "l0", c->l0 }, { "l1", c->l1 } });
     printf("%s\n", summary.dump().c_str());
     llama_free(E.ctx); llama_free(E.cap); llama_model_free(E.model); llama_backend_free();
     return 0;

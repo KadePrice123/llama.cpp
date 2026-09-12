@@ -16,7 +16,7 @@ modules) lives in the steermem trainer; this fork is what runs it as a GGUF.
 | embedding-input batches for the MEM positions | already in llama.cpp | `llama_batch` with `embd` |
 | hidden-state capture at the injection layers | done | `steermem/steermem.cpp`, over `cb_eval` in a second context with the LoRA scale at 0 |
 | the sidecar: table load (csv / json / jsonl), blocks after every key, traces, mem-gen, greedy decode | done, reads memory | `steermem/steermem.cpp` (`steermem-cli`); the export of a checkpoint's side weights is `steermem/side_export.py` |
-| the side-by-side with the PyTorch trainer on identical cells | in progress | the trainer's serve mode with `"raw": true` and pinned `"cells"` against `steermem-cli` on the same prompt |
+| the side-by-side with the PyTorch trainer on identical cells | done: the same output | the trainer's serve mode with `"raw": true` and pinned `"cells"` against `steermem-cli` on the same prompt: both recite James 3:14, both loop on one-line cells under the trainer's line rule (second result below) |
 | the merge for K>1, the HTTP server, table hot-swap | next | see the plan below |
 
 First result (2026-09-12 16:31, the Bible table of 45,106 verse and Strong's
@@ -39,6 +39,18 @@ wrong verse on a full table before this rule. The checkpoint reads the
 kinds of cells it trained on (verses, Strong's, file records); on an
 invented parameter table it loops in both the trainer and here -- the
 fine-tuning stage is what teaches those.
+
+Second result (17:10): the same prompt through the trainer's serve mode and
+through the sidecar, the two Strong's cells G26 and H1925 delivered, gave the
+same loop in both ("1. G26:", "G26:", "G26:", ...). The cause is in the
+trainer's rule for a row's "line" (the state pooled for the head and the
+per-position trace): "after the second newline", which for a one-line cell is
+the closing tag alone. `steermem-cli --line-rule 1` pools the content instead,
+and with it the sidecar reads the Strong's pair exactly, the file cells, and
+James 3:14 -- so the fork reproduces the trainer's behaviour under rule 2 and
+does better under rule 1. The side GGUF records the rule a checkpoint trained
+with (`steermem.line_rule`; absent means 2), and the sidecar follows it unless
+the flag overrides. `--no-traces` switches the per-position trace off.
 
 `llama_inject_set(ctx, il, n, pos, data, scale)` stores `n` unit vectors by
 position for layer `il`; on the next `llama_decode` the residual stream after

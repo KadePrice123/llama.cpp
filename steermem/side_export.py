@@ -39,6 +39,7 @@ def main():
     ap.add_argument("--mem-seq", type=int, default=128)
     ap.add_argument("--mem-seq-cells", type=int, default=4)
     ap.add_argument("--mem-gen", type=int, default=0)
+    ap.add_argument("--line-rule", type=int, default=1, help="the row-line rule the checkpoint trained with: 1 = the content span (patch 79 on), 2 = after the second newline (checkpoints before 79)")
     ap.add_argument("--mem-seq-every", type=int, default=1)
     ap.add_argument("--memtok", type=int, default=8)
     ap.add_argument("--key-window", type=int, default=96)
@@ -72,6 +73,7 @@ def main():
     w.add_uint32("steermem.mem_seq_every", a.mem_seq_every)
     w.add_uint32("steermem.memtok", a.memtok)
     w.add_uint32("steermem.key_window", a.key_window)
+    w.add_uint32("steermem.line_rule", a.line_rule)      # 1: the content span (trainer patch 79); 2: after the second newline (before it)
     w.add_float32("steermem.null_max", a.null_max)
     w.add_uint32("steermem.egroup", a.egroup)
     for l in layers:
