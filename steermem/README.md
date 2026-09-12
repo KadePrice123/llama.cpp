@@ -17,7 +17,10 @@ modules) lives in the steermem trainer; this fork is what runs it as a GGUF.
 | hidden-state capture at the injection layers | done | `steermem/steermem.cpp`, over `cb_eval` in a second context with the LoRA scale at 0 |
 | the sidecar: table load (csv / json / jsonl), blocks after every key, traces, mem-gen, greedy decode | done, reads memory | `steermem/steermem.cpp` (`steermem-cli`); the export of a checkpoint's side weights is `steermem/side_export.py` |
 | the side-by-side with the PyTorch trainer on identical cells | done: the same output | the trainer's serve mode with `"raw": true` and pinned `"cells"` against `steermem-cli` on the same prompt: both recite James 3:14, both loop on one-line cells under the trainer's line rule (second result below) |
-| the merge for K>1, the HTTP server, table hot-swap | next | see the plan below |
+| the HTTP server and the chat page | done | `steermem-cli --serve PORT --tables DIR`: GET /, /ui, POST /preset, /table, /chat (NDJSON stream), /stop; the trainer's serve API |
+| table hot-swap | done | POST /table (csv text or a cells list) or /preset replaces the cells; captures are lazy, so a swap costs nothing until a key is used |
+| a Windows build on base Windows (no WSL, no Python) | done | cross-compiled from WSL with MinGW-w64, static, AVX2; see Building |
+| the merge for K>1 | next | see the plan below |
 
 First result (2026-09-12 16:31, the Bible table of 45,106 verse and Strong's
 cells, the checkpoint gck_D4N4k2B.s250 as base + LoRA adapter + side weights):
@@ -82,9 +85,36 @@ The capacity of this carrier was measured in the trainer: one position holds
 one exact token, and a cell should hold at most about 256 tokens; longer
 content is split into linked cells.
 
+## Running it
+
+    steermem-cli --model qwen35-2b-q8_0.gguf --lora steermem-STAGE-lora.gguf --side steermem-side-STAGE.gguf         --table tables/cells_demo_files.jsonl --tables tables --serve 8151
+    # then open http://127.0.0.1:8151/ui -- presets, csv/json upload, MEM toggle, the reasoning and the answer
+
+The page and the API are in the binary (cpp-httplib, vendored); nothing else is
+needed at the venue. Messages go under Qwen's chat template with the opening
+think tag as the generation prompt, so the model emits its reasoning and the
+closing tag itself; keys it writes in that reasoning fire their blocks as it
+writes them (mem-gen), a key counting as complete only once the next token
+confirms a word boundary. One generation at a time; `/stop` ends it at the next
+token. The trainer's Streamlit panel (`tools/memchat_ui.py`) speaks the same API.
+
 ## Building
 
-    cmake -B build-cpu -DGGML_VULKAN=OFF -DCMAKE_BUILD_TYPE=Release
+Linux (the libraries, then the sidecar against them):
+
+    cmake -B build-cpu -DGGML_VULKAN=OFF -DLLAMA_CURL=OFF -DCMAKE_BUILD_TYPE=Release
+    cmake --build build-cpu -j 8 --target llama ggml
+    g++ -O2 -std=c++17 -I include -I ggml/include -I vendor steermem/steermem.cpp vendor/cpp-httplib/httplib.cpp         -L build-cpu/bin -lllama -lggml -lggml-base -lpthread -Wl,-rpath,$PWD/build-cpu/bin -o build-cpu/bin/steermem-cli
+
+Windows, cross-compiled from Linux/WSL with MinGW-w64 (`apt install mingw-w64`), a
+static exe that runs on base Windows (AVX2; no GPU):
+
+    cmake -B build-win -DCMAKE_SYSTEM_NAME=Windows -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc-posix         -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++-posix -DCMAKE_RC_COMPILER=x86_64-w64-mingw32-windres         -DGGML_VULKAN=OFF -DGGML_NATIVE=OFF -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_AVX512=OFF         -DGGML_OPENMP=OFF -DLLAMA_CURL=OFF -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release         -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_SERVER=OFF
+    cmake --build build-win -j 12 --target llama ggml
+    x86_64-w64-mingw32-g++-posix -O2 -std=c++17 -I include -I ggml/include -I vendor steermem/steermem.cpp         vendor/cpp-httplib/httplib.cpp build-win/src/libllama.a build-win/ggml/src/ggml.a         build-win/ggml/src/ggml-cpu.a build-win/ggml/src/ggml-base.a -lws2_32 -static -static-libgcc         -static-libstdc++ -o build-win/steermem-cli.exe
+
+The `-posix` compilers matter (std::thread for the server). The old stock targets:
+
     cmake --build build-cpu -j 8 --target llama-cli llama-server
 
 The 2B runs on an AVX2 CPU at Q8_0; the bf16 GGUF is only for machines with
