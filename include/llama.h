@@ -722,6 +722,19 @@ extern "C" {
     // to an n_embd x n_layers buffer starting from layer 1.
     // il_start and il_end are the layer range the vector should apply to (both inclusive)
     // See llama_control_vector_load in common to load a control vector.
+    // steermem: position-tagged residual injection. For layer il, add
+    // scale * v[pos] * ||h[pos]|| to the residual stream after that layer at the
+    // given positions (v: n rows of n_embd floats, unit vectors); other positions
+    // are untouched. Set before llama_decode; llama_inject_clear removes all.
+    LLAMA_API int32_t llama_inject_set(
+            struct llama_context * ctx,
+                         int32_t   il,
+                         int32_t   n,
+                 const llama_pos * pos,
+                     const float * data,
+                           float   scale);
+    LLAMA_API void llama_inject_clear(struct llama_context * ctx);
+
     LLAMA_API int32_t llama_set_adapter_cvec(
             struct llama_context * ctx,
                      const float * data,

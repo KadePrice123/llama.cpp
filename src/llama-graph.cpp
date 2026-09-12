@@ -1489,6 +1489,7 @@ llm_graph_context::llm_graph_context(const llm_graph_params & params) :
     loras            (params.loras),
     mctx             (params.mctx),
     cross            (params.cross),
+    inject           (params.inject),
     samplers         (params.samplers),
     cb_func          (params.cb),
     res              (params.res),
@@ -1504,6 +1505,47 @@ void llm_graph_context::cb(ggml_tensor * cur, const char * name, int il) const {
 }
 
 
+
+// steermem
+void llm_graph_input_inject::set_input(const llama_ubatch * ubatch) {
+    const int64_t n_tokens = ubatch->n_tokens;
+    std::vector<float> buf((size_t) n_tokens * n_embd, 0.0f);
+    if (table != nullptr) {
+        const auto lit = table->layers.find(il);
+        if (lit != table->layers.end()) {
+            for (int64_t i = 0; i < n_tokens; ++i) {
+                const auto vit = lit->second.vec.find(ubatch->pos[i]);   // the temporal position (n_pos == 1, or the first dim)
+                if (vit != lit->second.vec.end() && (int64_t) vit->second.size() == n_embd) {
+                    std::copy(vit->second.begin(), vit->second.end(), buf.begin() + i*n_embd);
+                }
+            }
+        }
+    }
+    ggml_backend_tensor_set(vec, buf.data(), 0, buf.size()*sizeof(float));
+}
+
+ggml_tensor * llm_graph_context::build_inject(
+         ggml_tensor * cur,
+                 int   il) const {
+    if (inject == nullptr || inject->empty()) {
+        return cur;
+    }
+    const auto lit = inject->layers.find(il);
+    if (lit == inject->layers.end()) {
+        return cur;
+    }
+    auto inp = std::make_unique<llm_graph_input_inject>(inject, il, n_embd);
+    inp->vec = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_embd, n_tokens);
+    ggml_set_input(inp->vec);
+    cb(inp->vec, "inject_vec", il);
+    // ||h|| per token: a unit vector lands at the residual's own scale (the trainer's rule)
+    ggml_tensor * nrm = ggml_sqrt(ctx0, ggml_sum_rows(ctx0, ggml_sqr(ctx0, cur)));   // [1, n_tokens]
+    ggml_tensor * add = ggml_scale(ctx0, ggml_mul(ctx0, inp->vec, nrm), lit->second.scale);
+    cur = ggml_add(ctx0, cur, add);
+    cb(cur, "inject_out", il);
+    res->add_input(std::move(inp));
+    return cur;
+}
 
 ggml_tensor * llm_graph_context::build_cvec(
          ggml_tensor * cur,

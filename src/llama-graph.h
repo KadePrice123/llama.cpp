@@ -11,6 +11,7 @@
 #include <set>
 #include <functional>
 #include <map>
+#include <unordered_map>
 
 struct ggml_cgraph;
 struct ggml_context;
@@ -136,6 +137,22 @@ public:
     ggml_tensor * embd   = nullptr; // F32 [n_embd, n_batch]
 
     const int64_t n_embd = 0;
+};
+
+// steermem: one layer's injection vectors, gathered by position for this ubatch
+struct llama_inject_table;   // defined below, beside llm_graph_params
+class llm_graph_input_inject : public llm_graph_input_i {
+public:
+    llm_graph_input_inject(const llama_inject_table * table, int32_t il, int64_t n_embd) : table(table), il(il), n_embd(n_embd) {}
+    virtual ~llm_graph_input_inject() = default;
+
+    void set_input(const llama_ubatch * ubatch) override;
+
+    ggml_tensor * vec = nullptr; // F32 [n_embd, n_batch]
+
+    const llama_inject_table * table;
+    const int32_t il;
+    const int64_t n_embd;
 };
 
 // similar to llm_graph_input_embd but with an additional hidden state input
@@ -768,6 +785,16 @@ using llm_graph_cb = std::function<void(const llama_ubatch & ubatch, ggml_tensor
 
 class llm_graph_result;
 
+// steermem: per-layer, per-position residual injections (see llama_inject_set)
+struct llama_inject_table {
+    struct layer {
+        float scale = 1.0f;
+        std::unordered_map<llama_pos, std::vector<float>> vec;   // position -> n_embd floats
+    };
+    std::map<int32_t, layer> layers;   // il -> its vectors
+    bool empty() const { return layers.empty(); }
+};
+
 struct llm_graph_params {
     llm_arch arch = LLM_ARCH_UNKNOWN;
 
@@ -785,6 +812,10 @@ struct llm_graph_params {
     const llama_adapter_loras    * loras;
     const llama_memory_context_i * mctx;
     const llama_cross            * cross;
+    const llama_inject_table     * inject;   // steermem
+    bool inject_on = false;   // steermem: a SNAPSHOT of !inject->empty() at graph time -- the pointer is to the live
+                              // table, so comparing it could never tell an old graph without injection nodes from a new
+                              // one that needs them (the first build reused the plain graph and injected nothing)
 
     std::map<llama_seq_id, llama_sampler *> samplers;
 
@@ -878,6 +909,7 @@ struct llm_graph_params {
             arch  == other.arch  &&
             gtype == other.gtype &&
             cvec  == other.cvec  &&
+            inject_on == other.inject_on &&   // steermem
             loras == other.loras &&
             cross == other.cross;
     }
@@ -1025,6 +1057,7 @@ struct llm_graph_context {
     const llama_adapter_loras    * loras;
     const llama_memory_context_i * mctx;
     const llama_cross            * cross;
+    const llama_inject_table     * inject;   // steermem
 
     std::map<llama_seq_id, llama_sampler *> samplers;
 
@@ -1043,6 +1076,11 @@ struct llm_graph_context {
     //
     // common
     //
+
+    // steermem: position-tagged residual injection after layer il
+    ggml_tensor * build_inject(
+             ggml_tensor * cur,
+                     int   il) const;
 
     ggml_tensor * build_cvec(
              ggml_tensor * cur,

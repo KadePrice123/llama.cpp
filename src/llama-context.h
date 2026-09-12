@@ -123,6 +123,11 @@ struct llama_context {
 
     bool adapters_lora_are_same(llama_adapter_lora ** adapters, size_t n_adapters, float * scales);
 
+    // steermem: position-tagged residual injection (llama_inject_set); bodies in the .cpp,
+    // where llama_model is a complete type
+    int32_t inject_set(int32_t il, int32_t n, const llama_pos * pos, const float * data, float scale);
+    void    inject_clear();
+
     bool set_adapter_cvec(
             const float * data,
                  size_t   len,
@@ -282,6 +287,7 @@ private:
     llama_cparams cparams;
 
     llama_adapter_cvec_ptr  cvec;
+    llama_inject_table      inject;   // steermem
     llama_adapter_loras_ptr loras;
 
     llama_cross cross; // TODO: tmp for handling cross-attention - need something better probably

@@ -193,6 +193,7 @@ llama_model_qwen3next::graph::graph(const llama_model & model, const llm_graph_p
         cb(cur, "post_moe", il);
 
         cur = build_cvec(cur, il);
+        cur = build_inject(cur, il);   // steermem
         cb(cur, "l_out", il);
 
         // Input for next layer

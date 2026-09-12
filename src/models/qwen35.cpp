@@ -196,6 +196,7 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
         cb(cur, "post_ffn", il);
 
         cur = build_cvec(cur, il);
+        cur = build_inject(cur, il);   // steermem
         cb(cur, "l_out", il);
 
         // Input for next layer

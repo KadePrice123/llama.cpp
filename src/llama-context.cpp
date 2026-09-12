@@ -2482,6 +2482,8 @@ llm_graph_params llama_context::graph_params(
         /*.loras       =*/ loras.get(),
         /*.mctx        =*/ mctx,
         /*.cross       =*/ &cross,
+        /*.inject      =*/ &inject,
+        /*.inject_on   =*/ !inject.empty(),
         /*.samplers    =*/ sampling.samplers,
         /*.n_outputs   =*/ n_outputs,
         /*.cb          =*/ graph_get_cb(),
@@ -3996,6 +3998,32 @@ int32_t llama_set_adapters_lora(
     ctx->set_adapters_lora(adapters, n_adapters, scales);
 
     return 0;
+}
+
+// steermem
+int32_t llama_context::inject_set(int32_t il, int32_t n, const llama_pos * pos, const float * data, float scale) {
+    if (n <= 0 || il < 0 || pos == nullptr || data == nullptr) {
+        return -1;
+    }
+    auto & L = inject.layers[il];
+    L.scale = scale;
+    const size_t ne = model.hparams.n_embd;
+    for (int32_t i = 0; i < n; ++i) {
+        L.vec[pos[i]].assign(data + (size_t) i*ne, data + (size_t) (i + 1)*ne);
+    }
+    return 0;
+}
+
+void llama_context::inject_clear() {
+    inject.layers.clear();
+}
+
+int32_t llama_inject_set(llama_context * ctx, int32_t il, int32_t n, const llama_pos * pos, const float * data, float scale) {
+    return ctx->inject_set(il, n, pos, data, scale);
+}
+
+void llama_inject_clear(llama_context * ctx) {
+    ctx->inject_clear();
 }
 
 int32_t llama_set_adapter_cvec(
