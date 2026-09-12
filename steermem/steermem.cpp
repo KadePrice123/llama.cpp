@@ -336,14 +336,15 @@ struct engine_t {
         }
         return best;
     }
-    void feed_text(const std::vector<llama_token> & seg, std::vector<cell_t *> & cands, bool want_logits) {
+    void feed_text(const std::vector<llama_token> & seg, std::vector<cell_t *> & cands, bool want_logits, bool trace_last = false) {
         // traces at positions 7, 15, ... (text coordinates) inside this segment
         const int t0 = (int) text.size();
         std::vector<llama_token> tmp = text;
         for (int i = 0; i < (int) seg.size(); ++i) {
             tmp.push_back(seg[i]);
             const int pt = t0 + i;
-            if (side.memtok > 0 && pt % side.memtok == side.memtok - 1) {
+            // the trainer's memtok points: every K-th text position, and always the last prompt token
+            if (side.memtok > 0 && (pt % side.memtok == side.memtok - 1 || (trace_last && i + 1 == (int) seg.size()))) {
                 std::swap(text, tmp);                   // route over the text up to and including pt
                 cell_t * c = route(cands);
                 std::swap(text, tmp);
@@ -449,10 +450,10 @@ int main(int argc, char ** argv) {
     int done = 0;
     for (size_t k = 0; k < hits.size(); ++k) {
         const int cut = hits[k].end;
-        if (cut > done) { std::vector<llama_token> seg(seed.begin() + done, seed.begin() + cut); E.feed_text(seg, cands, false); done = cut; }
+        if (cut > done) { std::vector<llama_token> seg(seed.begin() + done, seed.begin() + cut); E.feed_text(seg, cands, false, cut == (int) seed.size()); done = cut; }
         E.feed_block(*hits[k].c, done == (int) seed.size());
     }
-    if (done < (int) seed.size()) { std::vector<llama_token> seg(seed.begin() + done, seed.end()); E.feed_text(seg, cands, true); }
+    if (done < (int) seed.size()) { std::vector<llama_token> seg(seed.begin() + done, seed.end()); E.feed_text(seg, cands, true, true); }
 
     // ---- generation ----------------------------------------------------------------------
     std::vector<cell_t *> all; for (auto & c : E.cells) all.push_back(&c);
