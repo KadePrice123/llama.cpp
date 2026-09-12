@@ -1637,6 +1637,78 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.speculative.ngram_cache.lookup_cache_dynamic = value;
         }
     ).set_examples({LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER}));
+    // --- n-gram lookup BIAS (see common/ngram-bias.h) ------------------------
+    // Distinct from the -lcs/-lcd options above, which feed the SPECULATIVE
+    // drafter and are therefore distribution-preserving: they make the model
+    // faster at saying what it would have said anyway and cannot introduce a
+    // fact it does not have. These options STEER, with no verification step.
+    add_opt(common_arg(
+        {"--ngram-bias"}, "N",
+        "add N to the logit of the token an n-gram lookup table expects next "
+        "(default: 0.0 = disabled). UNVERIFIED: this changes what the model says, "
+        "so a wrong table produces a confidently wrong answer",
+        [](common_params & params, const std::string & value) {
+            params.sampling.ngram_bias = std::stof(value);
+        }
+    ));
+    add_opt(common_arg(
+        {"--ngram-bias-gap"}, "N",
+        "only apply --ngram-bias when the table's expected token is at least N "
+        "logits below the model's own top choice, i.e. only where the table "
+        "DISAGREES (default: 0.0 = always, which mostly boosts filler tokens "
+        "the model was going to emit anyway)",
+        [](common_params & params, const std::string & value) {
+            params.sampling.ngram_bias_gap = std::stof(value);
+        }
+    ));
+    add_opt(common_arg(
+        {"--ngram-bias-use-context"},
+        "feed the model's own generation back into the --ngram-bias lookup "
+        "(default: off). Usually a mistake: the context cache is consulted first "
+        "with lax thresholds, so it amplifies whatever the model just repeated "
+        "rather than steering away from it",
+        [](common_params & params) {
+            params.sampling.ngram_bias_use_ctx = true;
+        }
+    ));
+    add_opt(common_arg(
+        {"--ngram-bias-target"}, "STRING",
+        "bias along this exact string instead of consulting a table. Intended to "
+        "be set PER REQUEST alongside a grammar: the grammar bounds what is legal, "
+        "this ranks within it. A grammar-masked token stays at -inf however hard "
+        "you push, so this cannot produce output outside the grammar",
+        [](common_params & params, const std::string & value) {
+            params.sampling.ngram_bias_target = value;
+        }
+    ));
+    add_opt(common_arg(
+        {"--ngram-bias-table"}, "FNAME",
+        "static lookup table for --ngram-bias, built with llama-lookup-create",
+        [](common_params & params, const std::string & value) {
+            params.sampling.ngram_bias_static = value;
+        }
+    ));
+    add_opt(common_arg(
+        {"--ngram-bias-table-dynamic"}, "FNAME",
+        "optional dynamic lookup table for --ngram-bias",
+        [](common_params & params, const std::string & value) {
+            params.sampling.ngram_bias_dynamic = value;
+        }
+    ));
+    add_opt(common_arg(
+        {"--ngram-bias-min"}, "N",
+        "shortest token history to match for --ngram-bias (default: 1)",
+        [](common_params & params, int value) {
+            params.sampling.ngram_bias_min = value;
+        }
+    ));
+    add_opt(common_arg(
+        {"--ngram-bias-max"}, "N",
+        "longest token history to match for --ngram-bias (default: 4)",
+        [](common_params & params, int value) {
+            params.sampling.ngram_bias_max = value;
+        }
+    ));
     add_opt(common_arg(
         {"-c", "--ctx-size"}, "N",
         string_format("size of the prompt context (default: %d, 0 = loaded from model)", params.n_ctx),

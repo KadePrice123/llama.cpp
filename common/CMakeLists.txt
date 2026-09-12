@@ -88,6 +88,8 @@ add_library(${TARGET}
     log.h
     ngram-cache.cpp
     ngram-cache.h
+    ngram-bias.cpp
+    ngram-bias.h
     ngram-map.cpp
     ngram-map.h
     ngram-mod.cpp

@@ -278,6 +278,46 @@ struct common_params_sampling {
     std::vector<llama_logit_bias> logit_bias;     // logit biases to apply
     std::vector<llama_logit_bias> logit_bias_eog; // pre-calculated logit biases for EOG tokens
 
+    // --- n-gram lookup BIAS (see common/ngram-bias.h) -------------------------
+    // NOT speculative decoding. --spec-type ngram-cache drafts from the same
+    // tables and lets the model VERIFY, which is distribution-preserving and so
+    // cannot introduce a fact the model lacks. These fields steer instead: the
+    // token the table expects next has its logit raised, with no verification.
+    float       ngram_bias         = 0.0f;   // 0 = disabled. ~5.0 forced a 5-token
+                                             // unknown fact on Qwen3.5-4B; 2-3
+                                             // produced partial strings.
+    bool        ngram_bias_use_ctx = false;  // feed generation back into the lookup.
+                                             // Off by default: the context cache is
+                                             // consulted first with lax thresholds,
+                                             // so it amplifies the model's own
+                                             // repetitions instead of steering.
+    float       ngram_bias_init    = 0.0f;   // strength for STARTING a target when
+                                             // the model is not already walking it.
+                                             // Without this the sampler can only
+                                             // follow a retrieval the model began
+                                             // on its own, which an un-fine-tuned
+                                             // model never does. Applies in free
+                                             // text where no grammar bounds it, so
+                                             // keep it well below ngram_bias.
+    int32_t     ngram_bias_after   = 0;      // stay inert for this many generated
+                                             // tokens, so the model's fixed opening
+                                             // habit is left alone and steering
+                                             // happens where its prior is weak.
+    float       ngram_bias_gap     = 0.0f;   // only bias when the table's token is
+                                             // this many logits below the model's
+                                             // own top choice. 0 = always bias,
+                                             // which mostly boosts filler.
+    std::string ngram_bias_static;           // table from llama-lookup-create
+    std::string ngram_bias_dynamic;          // optional, previous generations
+    std::string ngram_bias_target;           // PER-REQUEST. When set, replaces the
+                                             // table lookup: bias along this exact
+                                             // string. Pairs with a lazy grammar --
+                                             // grammar bounds what is legal, this
+                                             // ranks within it, and a masked token
+                                             // stays at -inf however hard you push.
+    int32_t     ngram_bias_min     = 1;      // LLAMA_NGRAM_MIN
+    int32_t     ngram_bias_max     = 4;      // LLAMA_NGRAM_MAX
+
     // The assistant generation prompt already prefilled into the prompt.
     // Fed to the grammar sampler (to advance past pre-existing tokens) and used
     // to determine the reasoning budget sampler's initial state.

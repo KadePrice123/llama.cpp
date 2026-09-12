@@ -3,6 +3,7 @@
 #include "common.h"
 #include "fit.h"
 #include "log.h"
+#include "ngram-bias.h"
 #include "reasoning-budget.h"
 
 #include "ggml.h"
@@ -406,6 +407,31 @@ struct common_sampler * common_sampler_init(
         samplers.push_back(llama_sampler_init_mirostat_v2(params.seed, params.mirostat_tau, params.mirostat_eta));
     } else {
         GGML_ASSERT(false && "unknown mirostat version");
+    }
+
+    // n-gram lookup bias. Added to the chain BEFORE everything else on purpose:
+    // top-k / top-p / min-p truncate the candidate array, and raising the logit
+    // of a token that has already been pruned does nothing -- silently. Running
+    // first also means cur_p is still the untruncated, id-indexed full vocab,
+    // which is what ngram-bias.cpp's fast path relies on.
+    if (params.ngram_bias != 0.0f) {
+        // Tokenised here because this is where the vocab is in scope. special=true
+        // so a target lifted from a grammar branch tokenises the same way the
+        // model will emit it.
+        std::vector<llama_token> nb_target;
+        if (!params.ngram_bias_target.empty()) {
+            GGML_ASSERT(vocab != nullptr);
+            nb_target = common_tokenize(vocab, params.ngram_bias_target, false, true);
+        }
+        auto * smpl_ngram_bias = common_ngram_bias_init(
+                params.ngram_bias_static, params.ngram_bias_dynamic, nb_target,
+                params.ngram_bias, params.ngram_bias_init, params.ngram_bias_after,
+                params.ngram_bias_gap,
+                params.ngram_bias_use_ctx,
+                params.ngram_bias_min, params.ngram_bias_max);
+        if (smpl_ngram_bias) {
+            llama_sampler_chain_add(chain, smpl_ngram_bias);
+        }
     }
 
     for (auto * smpl : samplers) {

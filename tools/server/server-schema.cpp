@@ -377,6 +377,47 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
             }
         }));
 
+    // --- n-gram bias, per request (see common/ngram-bias.h) -----------------
+    // Designed to be sent ALONGSIDE a grammar. Compile the grammar from a memory
+    // table so every legal branch is an entry that genuinely exists, then pass
+    // the branch a retriever ranked highest as ngram_bias_target. The grammar
+    // says what is legal; this says what is likely; the model still chooses,
+    // including the abstain branch.
+    //
+    // Safe by construction: grammar-disallowed tokens are masked to -INFINITY,
+    // and -inf plus any finite bias is still -inf, so no bias strength can
+    // produce output outside the grammar.
+    add((new field_num("ngram_bias", params.sampling.ngram_bias))
+        ->set_desc("Logit bias added to the token an n-gram table or ngram_bias_target "
+                   "expects next (0 = disabled). UNVERIFIED on its own: without a "
+                   "grammar this changes what the model says"));
+
+    add((new field_num("ngram_bias_init", params.sampling.ngram_bias_init))
+        ->set_desc("Strength for STARTING an ngram_bias_target the model has not "
+                   "begun on its own (0 = follow-only). Without it the sampler is "
+                   "inert unless the model spontaneously writes the trigger, which "
+                   "an un-fine-tuned model will not do. Applies in free text where "
+                   "no grammar bounds it, so keep it well below ngram_bias"));
+
+    add((new field_num("ngram_bias_after", params.sampling.ngram_bias_after))
+        ->set_desc("Keep ngram_bias inert until this many tokens have been "
+                   "generated. Reasoning models open with a fixed habit that is "
+                   "expensive to fight and easy to damage; later steps are far "
+                   "less determined, so gate on position (0 = active at once)"));
+
+    add((new field_num("ngram_bias_gap", params.sampling.ngram_bias_gap))
+        ->set_desc("Only apply ngram_bias where the expected token is at least this "
+                   "many logits below the model's own top choice, i.e. only where "
+                   "the table disagrees (0 = always, which mostly boosts filler)"));
+
+    add((new field_str("ngram_bias_target"))
+        ->set_desc("Bias along this exact string rather than consulting a table. "
+                   "Intended to carry the retriever's top-ranked grammar branch")
+        ->set_handler([&](field_eval_context & ctx, const json & data) {
+            ctx.params.sampling.ngram_bias_target =
+                data.at("ngram_bias_target").get<std::string>();
+        }));
+
     add((new field_bool("reasoning_control", params.sampling.reasoning_control))
         ->set_desc("Create the budget sampler on demand so reasoning can be ended at runtime"));
 

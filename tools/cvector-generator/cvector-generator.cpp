@@ -100,6 +100,19 @@ struct callback_data {
     // all zero rows in the diff tensor will also be removed
     // NOTE: final layer is ignored. we only have (n_layers - 1) to process
     std::vector<struct ggml_tensor *> calc_diff() {
+        // The tool expects exactly n_layers-1 collected layers, and normally
+        // gets it by accident: the final layer's l_out is sliced by inp_out_ids
+        // so its ne[1] becomes 1 and it fails the callback's ne[1]==n_tokens
+        // filter. qwen35 gates that slice behind cparams.embeddings_nextn_masked,
+        // so with embeddings off the last layer is collected like the others and
+        // the count is n_layers. Drop the surplus explicitly instead of relying
+        // on that shape coincidence.
+        if ((int) v_pos.size() > n_layers - 1) {
+            v_pos.resize(n_layers - 1);
+        }
+        if ((int) v_neg.size() > n_layers - 1) {
+            v_neg.resize(n_layers - 1);
+        }
         for (float il = 0; il < v_pos.size(); il++) {
             float * a = (float *) v_pos[il]->data;
             float * b = (float *) v_neg[il]->data;
