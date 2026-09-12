@@ -1,0 +1,12 @@
+{"key": "P031 Motor NP Volts", "text": "480 V. Motor nameplate voltage. Range 10 to 480 V. Default 480.", "table": "drive parameters (example)"}
+{"key": "P032 Motor NP Hertz", "text": "60 Hz. Motor nameplate frequency. Range 10 to 500 Hz. Default 60.", "table": "drive parameters (example)"}
+{"key": "P033 Motor OL Current", "text": "4.2 A. Motor overload current, 0.1 to 7.0 A on frame A. Default 4.2.", "table": "drive parameters (example)"}
+{"key": "P039 Torque Perf Mode", "text": "1 = SVC. Sensorless vector control. 0 = V/Hz, 2 = Economize, 3 = Vector.", "table": "drive parameters (example)"}
+{"key": "P041 Accel Time 1", "text": "10.0 s. Time to accelerate from 0 to maximum frequency. Range 0.00 to 600.00 s.", "table": "drive parameters (example)"}
+{"key": "P042 Decel Time 1", "text": "10.0 s. Time to decelerate from maximum frequency to 0. Range 0.00 to 600.00 s.", "table": "drive parameters (example)"}
+{"key": "P043 Minimum Freq", "text": "0.0 Hz. Lowest commanded frequency. Range 0.00 to 500.00 Hz.", "table": "drive parameters (example)"}
+{"key": "P044 Maximum Freq", "text": "60.0 Hz. Highest commanded frequency. Range 0.00 to 500.00 Hz.", "table": "drive parameters (example)"}
+{"key": "P045 Stop Mode", "text": "0 = Ramp, CF. 1 = Coast, CF. 2 = DC Brake, CF. 3 = DCBrkAuto, CF. Default 0.", "table": "drive parameters (example)"}
+{"key": "P046 Start Source 1", "text": "1 = Keypad. 2 = DigIn TrmBlk. 3 = Serial/DSI. 4 = Network Opt. 5 = EtherNet/IP.", "table": "drive parameters (example)"}
+{"key": "P047 Speed Reference 1", "text": "1 = Drive Pot. 2 = Keypad Freq. 3 = Serial/DSI. 5 = 0-10V Input. 6 = 4-20mA Input.", "table": "drive parameters (example)"}
+{"key": "t062 DigIn TermBlk 02", "text": "7 = Preset Freq. Digital input 2 function. Default 7.", "table": "drive parameters (example)"}

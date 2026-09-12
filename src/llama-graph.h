@@ -148,7 +148,8 @@ public:
 
     void set_input(const llama_ubatch * ubatch) override;
 
-    ggml_tensor * vec = nullptr; // F32 [n_embd, n_batch]
+    ggml_tensor * vec  = nullptr; // F32 [n_embd, n_batch]
+    ggml_tensor * mask = nullptr; // F32 [1, n_batch]: 1 where a vector is set
 
     const llama_inject_table * table;
     const int32_t il;

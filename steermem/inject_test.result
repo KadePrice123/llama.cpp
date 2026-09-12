@@ -1,3 +1,2 @@
 max |logit diff|  plain vs injected: 0.2036   plain vs cleared: 0.0000
-argmax plain 248068  injected 248068  cleared 248068
 INJECT-TEST PASS

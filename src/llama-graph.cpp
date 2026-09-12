@@ -1510,6 +1510,7 @@ void llm_graph_context::cb(ggml_tensor * cur, const char * name, int il) const {
 void llm_graph_input_inject::set_input(const llama_ubatch * ubatch) {
     const int64_t n_tokens = ubatch->n_tokens;
     std::vector<float> buf((size_t) n_tokens * n_embd, 0.0f);
+    std::vector<float> msk((size_t) n_tokens, 0.0f);
     if (table != nullptr) {
         const auto lit = table->layers.find(il);
         if (lit != table->layers.end()) {
@@ -1517,11 +1518,13 @@ void llm_graph_input_inject::set_input(const llama_ubatch * ubatch) {
                 const auto vit = lit->second.vec.find(ubatch->pos[i]);   // the temporal position (n_pos == 1, or the first dim)
                 if (vit != lit->second.vec.end() && (int64_t) vit->second.size() == n_embd) {
                     std::copy(vit->second.begin(), vit->second.end(), buf.begin() + i*n_embd);
+                    msk[i] = 1.0f;
                 }
             }
         }
     }
     ggml_backend_tensor_set(vec, buf.data(), 0, buf.size()*sizeof(float));
+    ggml_backend_tensor_set(mask, msk.data(), 0, msk.size()*sizeof(float));
 }
 
 ggml_tensor * llm_graph_context::build_inject(
@@ -1538,9 +1541,17 @@ ggml_tensor * llm_graph_context::build_inject(
     inp->vec = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_embd, n_tokens);
     ggml_set_input(inp->vec);
     cb(inp->vec, "inject_vec", il);
-    // ||h|| per token: a unit vector lands at the residual's own scale (the trainer's rule)
+    inp->mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, 1, n_tokens);
+    ggml_set_input(inp->mask);
+    cb(inp->mask, "inject_mask", il);
+    // the trainer's rule: one reference norm per injection entry -- the MEAN of ||h|| over the injected
+    // positions of this ubatch (a MEM block is fed as one ubatch, so this is the block's mean) -- and
+    // h += scale * unit(v) * ref at each of them; a single injected position gets its own norm
     ggml_tensor * nrm = ggml_sqrt(ctx0, ggml_sum_rows(ctx0, ggml_sqr(ctx0, cur)));   // [1, n_tokens]
-    ggml_tensor * add = ggml_scale(ctx0, ggml_mul(ctx0, inp->vec, nrm), lit->second.scale);
+    ggml_tensor * num = ggml_sum(ctx0, ggml_mul(ctx0, nrm, inp->mask));               // [1]
+    ggml_tensor * den = ggml_sum(ctx0, inp->mask);                                    // [1]
+    ggml_tensor * ref = ggml_div(ctx0, num, den);                                     // [1]
+    ggml_tensor * add = ggml_scale(ctx0, ggml_mul(ctx0, inp->vec, ref), lit->second.scale);
     cur = ggml_add(ctx0, cur, add);
     cb(cur, "inject_out", il);
     res->add_input(std::move(inp));
