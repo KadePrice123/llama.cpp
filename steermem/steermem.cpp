@@ -57,6 +57,7 @@ using json = nlohmann::json;
 // ---------------------------------------------------------------- the table
 struct cell_t {
     std::string key, text, table;
+    std::vector<std::string> aliases;              // other spellings that name this cell (the core cell: "core memories")
     std::vector<std::vector<llama_token>> forms;   // key token forms, 2+ tokens each
     // capture (filled on first use)
     bool captured = false;
@@ -227,6 +228,7 @@ struct engine_t {
     // a table swap: the cells are replaced; captures are recomputed lazily on first use
     void set_table(std::vector<cell_t> cells_) {
         cells = std::move(cells_);
+        add_core_cell(cells);
         for (auto & c : cells) prep_forms(c);
     }
     void set_lora(float scale) {
@@ -236,7 +238,52 @@ struct engine_t {
     }
     void prep_forms(cell_t & c) {
         c.forms.clear();
-        for (auto & f : { tok(" " + c.key, false), tok(c.key, false) }) if (f.size() >= 2) c.forms.push_back(f);
+        std::vector<std::string> names = { c.key };
+        names.insert(names.end(), c.aliases.begin(), c.aliases.end());
+        for (auto & nm : names) for (auto & f : { tok(" " + nm, false), tok(nm, false) }) if (f.size() >= 2) c.forms.push_back(f);
+    }
+    // THE CORE CELL (19:20): what the trainer's items always carry -- "Core memory. Memory tables
+    // available: A; B; C." under the key "core memory" (and "core memories", the phrase the think
+    // uses) -- added to every loaded table that does not bring its own.
+    // THE INDEX CELLS (19:30): one per table, keyed by the table's name, listing its entries with a
+    // blurb each -- what the training items carry, so the model can map a loose question to a key by
+    // reading descriptions. A table that brings its own row under its name keeps it.
+    static std::string blurb(const std::string & text) {
+        std::string t = text; for (auto & ch : t) if (ch == '\n') ch = ' ';
+        size_t n = 0, i = 0; while (i < t.size() && n < 8) { if (t[i] == ' ') ++n; ++i; }
+        std::string b = t.substr(0, i); while (!b.empty() && (b.back() == ' ' || b.back() == ',' || b.back() == ';')) b.pop_back();
+        return b + (i < t.size() ? "..." : "");
+    }
+    static void add_index_cells(std::vector<cell_t> & cells) {
+        std::vector<std::string> names;
+        for (auto & c : cells) if (c.key != "core memory" && std::find(names.begin(), names.end(), c.table) == names.end()) names.push_back(c.table);
+        std::vector<cell_t> added;
+        for (auto & nm : names) {
+            bool has = false; for (auto & c : cells) if (c.key == nm) { has = true; break; }
+            if (has) continue;
+            std::vector<cell_t *> ents; for (auto & c : cells) if (c.table == nm && c.key != "core memory") ents.push_back(&c);
+            const size_t show = ents.size() > 60 ? 40 : ents.size();
+            std::string list; for (size_t i = 0; i < show; ++i) list += (i ? "; " : "") + ents[i]->key + " (" + blurb(ents[i]->text) + ")";
+            if (show < ents.size()) list += "; ... and " + std::to_string(ents.size() - show) + " more";
+            cell_t ix; ix.key = nm; ix.table = "index";
+            ix.text = "Index of " + nm + ": " + std::to_string(ents.size()) + " entries. Keyed by the entry name. Entries: " + list + ".";
+            added.push_back(ix);
+        }
+        cells.insert(cells.begin(), added.begin(), added.end());
+    }
+    static void add_core_cell(std::vector<cell_t> & cells) {
+        add_index_cells(cells);
+        for (auto & c : cells) if (c.key == "core memory") return;
+        std::vector<std::string> names;
+        for (auto & c : cells) if (c.table != "index" && std::find(names.begin(), names.end(), c.table) == names.end()) names.push_back(c.table);
+        cell_t core; core.key = "core memory"; core.table = "index"; core.aliases = { "core memories" };
+        std::string list;
+        for (size_t i = 0; i < names.size(); ++i) {
+            size_t n = 0; for (auto & c : cells) if (c.table == names[i]) ++n;
+            list += (i ? "; " : "") + names[i] + " (" + std::to_string(n) + " entries)";
+        }
+        core.text = "Core memory. Memory tables available: " + list + ".";
+        cells.insert(cells.begin(), core);
     }
     // the row's states through the base model, once
     void capture(cell_t & c) {
