@@ -648,9 +648,13 @@ static int serve(engine_t & E, const std::string & host, int port, const std::st
             send_json(res, r.summary);
             return;
         }
-        res.set_chunked_content_provider("application/x-ndjson", [&, prompt, max_new, memgen, memseq](size_t, httplib::DataSink & sink) {
+        // the provider runs after this handler has returned: capture nothing of the handler's frame
+        res.set_chunked_content_provider("application/x-ndjson", [&E, &mu, &stop_flag, prompt, max_new, memgen, memseq](size_t, httplib::DataSink & sink) {
             std::lock_guard<std::mutex> lk(mu);
-            const int mg = E.side.mem_gen, ms = E.side.mem_seq; apply(); stop_flag = false;
+            const int mg = E.side.mem_gen, ms = E.side.mem_seq;
+            if (memgen >= 0) E.side.mem_gen = memgen;
+            if (memseq > 0) E.side.mem_seq = memseq;
+            stop_flag = false;
             auto line = [&](const json & j) { std::string s = j.dump() + "\n"; return sink.write(s.data(), s.size()); };
             auto r = run_prompt(E, prompt, max_new, true,
                                 [&](const std::string & pc) { return line({ { "tok", pc } }) && !stop_flag.load(); },
