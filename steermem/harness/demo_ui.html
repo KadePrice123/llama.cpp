@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>steermem</title>
+<style>
+  :root {
+    --ground: #f3f5f7; --panel: #ffffff; --ink: #1c2126; --muted: #5d6873; --line: #dde2e7;
+    --memory: #0d7068; --memory-soft: #e3f3f1; --miss: #a4570f; --miss-soft: #fbefe2;
+    --tool: #5b3cc4; --tool-soft: #efeafc; --kept: #257a3e; --kept-soft: #e4f4e8; --think: #6c7680;
+    --radius: 8px; --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --ground: #14181c; --panel: #1b2025; --ink: #e5e9ed; --muted: #9aa5af; --line: #2c343b;
+      --memory: #4fc2b6; --memory-soft: #16302d; --miss: #e3a15c; --miss-soft: #36281a;
+      --tool: #a996f2; --tool-soft: #262038; --kept: #6cc98a; --kept-soft: #18301f; --think: #8b96a0; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--ground); color: var(--ink); font: 14px/1.5 system-ui, "Segoe UI", sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: baseline; padding: 12px 20px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { margin: 0; font-size: 17px; letter-spacing: .2px; }
+  header .meta { color: var(--muted); font-size: 12.5px; }
+  .grid { display: grid; grid-template-columns: 260px minmax(0, 1fr) 330px; gap: 16px; padding: 16px 20px; align-items: start; }
+  @media (max-width: 1100px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+  aside, section { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; }
+  h2 { font-size: 11.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 8px; }
+  .block + .block { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+  .ex-group { margin-bottom: 12px; }
+  .ex-group b { display: block; font-size: 12.5px; margin-bottom: 4px; }
+  .ex { display: block; width: 100%; text-align: left; background: none; border: 1px solid transparent; border-radius: 6px; padding: 5px 7px; color: var(--ink); font: inherit; font-size: 12.5px; cursor: pointer; }
+  .ex:hover, .ex:focus-visible { border-color: var(--line); background: var(--ground); outline: none; }
+  #log { display: flex; flex-direction: column; gap: 14px; min-height: 280px; max-height: calc(100vh - 290px); overflow-y: auto; padding: 4px 2px 10px; }
+  .user { align-self: flex-end; max-width: 80%; background: var(--memory-soft); border-radius: 12px 12px 2px 12px; padding: 8px 12px; white-space: pre-wrap; }
+  .assistant { display: flex; flex-direction: column; gap: 8px; }
+  details.think { border-left: 3px solid var(--line); padding: 2px 0 2px 10px; color: var(--think); }
+  details.think summary { cursor: pointer; font-size: 12px; }
+  .thinkbody { white-space: pre-wrap; font-size: 13px; }
+  .answer { white-space: pre-wrap; }
+  .pill { display: inline-block; margin: 2px 2px; padding: 1px 8px; border-radius: 999px; font-size: 12px; white-space: normal; }
+  .pill.hit { background: var(--memory-soft); color: var(--memory); }
+  .pill.miss { background: var(--miss-soft); color: var(--miss); }
+  .pill small { opacity: .85; }
+  code.call, .toolbox { font-family: var(--mono); font-size: 12.5px; }
+  code.call { display: inline-block; background: var(--tool-soft); color: var(--tool); border-radius: 6px; padding: 2px 8px; margin: 2px 0; }
+  .toolbox { background: var(--tool-soft); border-radius: 6px; padding: 8px 10px; white-space: pre-wrap; max-height: 180px; overflow: auto; color: var(--ink); }
+  .toolbox b { color: var(--tool); font-family: system-ui, sans-serif; }
+  .kept { display: inline-block; background: var(--kept-soft); color: var(--kept); border-radius: 6px; padding: 2px 8px; margin: 2px 0; }
+  .foot { color: var(--muted); font-size: 12px; }
+  textarea, input[type=text], input:not([type]) { width: 100%; font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+  textarea:focus-visible, input:focus-visible, button:focus-visible { outline: 2px solid var(--memory); outline-offset: 1px; }
+  #ask { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-top: 10px; }
+  #q { min-height: 46px; resize: vertical; }
+  button.primary { background: var(--memory); color: #fff; border: 0; border-radius: 6px; padding: 8px 16px; font: inherit; font-weight: 600; cursor: pointer; }
+  button.primary:disabled { opacity: .5; cursor: progress; }
+  button.quiet { background: none; border: 1px solid var(--line); color: var(--muted); border-radius: 6px; padding: 4px 10px; font: inherit; font-size: 12px; cursor: pointer; }
+  #sysbox { margin-bottom: 10px; }
+  #sysbox summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
+  #system { min-height: 90px; margin-top: 6px; font-size: 12.5px; }
+  .mem { border-top: 1px solid var(--line); padding: 7px 0; font-size: 12.5px; }
+  .mem b { display: block; word-break: break-all; }
+  .mem span { color: var(--muted); }
+  #mlist { max-height: 34vh; overflow-y: auto; margin-top: 8px; }
+  .stack { display: grid; gap: 6px; }
+  .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+  label.check { display: flex; gap: 6px; align-items: center; font-size: 12.5px; color: var(--muted); }
+  #sleeplog { max-height: 160px; overflow-y: auto; font-size: 12px; color: var(--muted); white-space: pre-wrap; }
+  input[type=file] { font-size: 12.5px; color: var(--muted); max-width: 100%; }
+</style>
+</head>
+<body>
+<header>
+  <h1>steermem</h1>
+  <span class="meta" id="meta">loading the model…</span>
+</header>
+<main class="grid">
+  <aside>
+    <h2>Try one</h2>
+    <div id="examples"></div>
+  </aside>
+  <section>
+    <details id="sysbox"><summary>System prompt — list the keys worth recalling here, and when</summary>
+      <textarea id="system" placeholder="Memory you can use (recall with &lt;recall&gt;KEY&lt;recall&gt;):&#10;- H168: the Hebrew word behind &quot;tent&quot; in Numbers 6:10. Recall it when that word's original meaning matters."></textarea>
+    </details>
+    <div id="log" aria-live="polite"></div>
+    <form id="ask">
+      <textarea id="q" placeholder="Ask something. The model decides what to recall."></textarea>
+      <button class="primary" id="send">Send</button>
+    </form>
+    <div class="row" style="margin-top:8px"><span class="foot" id="status"></span><span class="row"><label class="foot" title="Before each answer, match the message against every memory on the model's own hidden states and list the best keys in the system prompt">auto menu <select id="automenu"><option value="">as started</option><option value="0">off</option><option value="3">3 keys</option><option value="5">5 keys</option></select></label><label class="foot" title="Before the answer, words the model finds surprising that name a stored memory get that memory's rows right after them">auto inject <select id="autoinject"><option value="">as started</option><option value="0">off</option><option value="16">16 tokens</option><option value="32">32 tokens</option><option value="64">64 tokens</option></select></label><button class="quiet" id="stop" type="button">Stop</button><button class="quiet" id="clear" type="button">New conversation</button></span></div>
+  </section>
+  <aside>
+    <div class="block">
+      <h2>Memory</h2>
+      <input id="mq" placeholder="Search keys and memories">
+      <div id="mlist"></div>
+    </div>
+    <div class="block stack">
+      <h2>Learn a file</h2>
+      <input type="file" id="upfile" accept=".csv,.json,.jsonl,.txt,.md">
+      <span class="foot">CSV or JSON rows with key and context (a summary is stored as is); text is split into pieces. It is learned at the next sleep.</span>
+      <div id="upres" class="foot"></div>
+    </div>
+    <div class="block stack">
+      <h2>Remember something</h2>
+      <input id="mkey" placeholder="Key (optional) — a filename, a setting, a person">
+      <textarea id="mctx" placeholder="What to remember. The model writes the memory itself."></textarea>
+      <label class="check"><input type="checkbox" id="mnow"> write it now instead of at the next sleep</label>
+      <button class="primary" id="madd" type="button">Remember</button>
+      <div id="mres" class="foot"></div>
+    </div>
+    <div class="block stack">
+      <h2>Sleep</h2>
+      <div class="row"><span class="foot" id="qcount">Nothing waiting</span><button class="primary" id="sleepbtn" type="button">Sleep now</button></div>
+      <div id="sleeplog"></div>
+    </div>
+  </aside>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+const post = (path, body) => fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+const LABELS = { strongs_list: "Every Strong's number in a verse", rebuild: "Rebuild a verse from its Strong's", words_only: "Words only",
+  param_docs: "Read a tool's docs", research: "Nothing stored: go to the tools", research_notools: "Nothing stored, no tools",
+  menu: "Your system prompt picks the key", menu_none: "Nothing in the menu fits", gist: "The memory is enough", fetch: "The memory says where it is" };
+let history = [];
+
+async function readStream(resp, onEvent) {
+  if (!resp.ok) { let msg = resp.statusText; try { msg = (await resp.json()).error || msg; } catch (e) {} throw new Error(msg); }
+  const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf('\n')) >= 0) { const line = buf.slice(0, nl); buf = buf.slice(nl + 1); if (line.trim()) onEvent(JSON.parse(line)); }
+  }
+}
+
+async function loadState() {
+  const s = await (await fetch('/api/state')).json();
+  $('#meta').textContent = `checkpoint step ${s.step} · ${s.keys} keys · ${s.manuals} tool manuals · ${s.device} ${s.dtype} · memory at layers ${s.layers.join(', ')} · remember: ${s.remember_mode || 'store'} · auto menu: ${s.auto_menu ? s.auto_menu + ' keys' : 'off'} · auto inject: ${s.auto_inject ? s.auto_inject + ' tokens' : 'off'}`;
+  const groups = {};
+  for (const e of s.examples || []) (groups[e.task] ||= []).push(e);
+  const box = $('#examples'); box.replaceChildren();
+  for (const [task, items] of Object.entries(groups)) {
+    const g = el('div', 'ex-group'); g.append(el('b', null, LABELS[task] || task));
+    for (const e of items.slice(0, 4)) {
+      const b = el('button', 'ex', e.question);
+      b.onclick = () => { $('#system').value = e.system || ''; $('#sysbox').open = !!e.system; $('#q').value = e.question; $('#q').focus(); };
+      g.append(b);
+    }
+    box.append(g);
+  }
+  if (!Object.keys(groups).length) box.append(el('div', 'foot', 'No examples loaded.'));
+}
+
+function renderSaid(box, text) {
+  box.replaceChildren();
+  const re = /(<tool_call>[\s\S]*?<\/tool_call>|<\|remember\|>[\s\S]*?<\|remember\|>|<\|alias\|>[\s\S]*?<\|alias\|>)/g;
+  let last = 0, m;
+  while ((m = re.exec(text))) {
+    if (m.index > last) box.append(document.createTextNode(text.slice(last, m.index)));
+    const seg = m[0];
+    if (seg.startsWith('<tool_call>')) {
+      const fn = (seg.match(/<function=([^>\s]+)>/) || [])[1] || '?';
+      const ps = [...seg.matchAll(/<parameter=([^>\s]+)>\s*([\s\S]*?)\s*<\/parameter>/g)].map(p => `${p[1]}=${p[2]}`).join(', ');
+      box.append(el('code', 'call', `${fn}(${ps})`));
+    } else if (seg.startsWith('<|remember|>')) {
+      box.append(el('span', 'kept', 'remember → ' + seg.slice(12, -12)));
+    } else {
+      box.append(el('span', 'kept', 'alias → ' + seg.slice(9, -9)));
+    }
+    last = m.index + seg.length;
+  }
+  if (last < text.length) box.append(document.createTextNode(text.slice(last)));
+}
+
+function renderThink(box, text, recalls) {
+  box.replaceChildren();
+  const re = /<recall>([^<\n]*)<recall>/g;
+  let last = 0, m, i = 0;
+  while ((m = re.exec(text))) {
+    if (m.index > last) box.append(document.createTextNode(text.slice(last, m.index)));
+    const info = recalls[i++];
+    if (!info) box.append(el('span', 'pill miss', `recall ${m[1]} …`));
+    else if (info.hit) { const p = el('span', 'pill hit', `recall ${m[1]} → `); p.append(el('small', null, info.summary.length > 160 ? info.summary.slice(0, 160) + '…' : info.summary)); box.append(p); }
+    else box.append(el('span', 'pill miss', `recall ${m[1]} → nothing stored · nearest: ${(info.near || []).join(', ')}`));
+    last = m.index + m[0].length;
+  }
+  const tail = text.slice(last).replace(/<recall>[^<\n]*$/, '');
+  if (tail) box.append(document.createTextNode(tail));
+}
+
+function newTurn(host) {
+  const t = { raw: '', recalls: [] };
+  t.think = el('details', 'think'); t.think.open = true;
+  t.think.append(el('summary', null, 'thinking'));
+  t.thinkBody = el('div', 'thinkbody'); t.think.append(t.thinkBody);
+  t.said = el('div', 'answer');
+  host.append(t.think, t.said);
+  return t;
+}
+
+function paint(t) {
+  const cut = t.raw.indexOf('</think>');
+  renderThink(t.thinkBody, cut < 0 ? t.raw : t.raw.slice(0, cut), t.recalls);
+  renderSaid(t.said, cut < 0 ? '' : t.raw.slice(cut + 8).replace(/^\s+/, ''));
+}
+
+async function send(ev) {
+  ev?.preventDefault();
+  const q = $('#q').value.trim();
+  if (!q) return;
+  $('#send').disabled = true; $('#status').textContent = 'thinking…';
+  history.push({ role: 'user', content: q });
+  $('#log').append(el('div', 'user', q)); $('#q').value = '';
+  const host = el('div', 'assistant'); $('#log').append(host);
+  let t = newTurn(host);
+  try {
+    const body = { messages: history, system: $('#system').value.trim(), max_new: 700 };
+    if ($('#automenu').value !== '') body.auto_menu = Number($('#automenu').value);
+    if ($('#autoinject').value !== '') body.auto_inject = Number($('#autoinject').value);
+    const resp = await post('/api/chat', body);
+    await readStream(resp, e => {
+      if (e.type === 'menu') { if (e.keys && e.keys.length) host.append(el('div', 'foot', 'came to mind: ' + e.keys.join(', '))); }
+      else if (e.type === 'inject') { host.append(el('span', 'kept', `injected after "${e.word}": ${e.key}, ${e.rows} memory tokens (surprise ${e.surprise} nats, ${e.match} match)`)); }
+      else if (e.type === 'token') { t.raw += e.text; paint(t); }
+      else if (e.type === 'recall') { t.recalls.push(e); paint(t); }
+      else if (e.type === 'tool') { const b = el('div', 'toolbox'); b.append(el('b', null, `${e.name} returned\n`), document.createTextNode(e.result)); host.append(b); }
+      else if (e.type === 'turn') { t.think.open = false; t = newTurn(host); }
+      else if (e.type === 'remember') { host.append(el('span', 'kept', `${e.status === 'queued' ? 'queued for sleep' : 'stored'}: ${e.key} is ${e.summary}`)); loadMemories(); refreshQueue(); }
+      else if (e.type === 'alias') { host.append(el('span', 'kept', `alias stored: ${e.from} → ${e.to}`)); }
+      else if (e.type === 'done') { t.think.open = false; history.push({ role: 'assistant', content: e.answer }); $('#status').textContent = `${e.tokens} tokens in ${e.seconds}s`; }
+      $('#log').scrollTop = $('#log').scrollHeight;
+    });
+  } catch (err) {
+    host.append(el('div', 'foot', 'Error: ' + err.message)); history.pop(); $('#status').textContent = '';
+  } finally { $('#send').disabled = false; }
+}
+
+async function loadMemories() {
+  const s = await (await fetch('/api/memories?q=' + encodeURIComponent($('#mq').value.trim()))).json();
+  const box = $('#mlist'); box.replaceChildren();
+  for (const m of s.memories) {
+    const d = el('div', 'mem'); d.append(el('b', null, m.key + (m.source && m.source !== 'table' ? `  · ${m.source}` : '')), el('span', null, m.summary));
+    box.append(d);
+  }
+  if (!s.memories.length) box.append(el('div', 'foot', 'No memories match.'));
+}
+
+async function refreshQueue() {
+  const s = await (await fetch('/api/queue')).json();
+  const n = (s.queued || []).length;
+  $('#qcount').textContent = n ? `${n} waiting for sleep` : 'Nothing waiting';
+  $('#sleepbtn').disabled = !n;
+}
+
+async function uploadFile(ev) {
+  const f = ev.target.files[0]; if (!f) return;
+  $('#upres').textContent = `Reading ${f.name}…`;
+  try {
+    const r = await post('/api/upload', { name: f.name, content: await f.text() });
+    const s = await r.json();
+    if (!r.ok) throw new Error(s.error);
+    $('#upres').textContent = `${f.name}: ${s.queued} to learn at sleep, ${s.stored} stored now${s.skipped ? `, ${s.skipped} rows skipped` : ''}.`;
+    loadMemories(); refreshQueue();
+  } catch (err) { $('#upres').textContent = 'Error: ' + err.message; }
+  finally { ev.target.value = ''; }
+}
+
+async function remember() {
+  const key = $('#mkey').value.trim(), context = $('#mctx').value.trim(), now = $('#mnow').checked;
+  if (!context) { $('#mres').textContent = 'Write what to remember first.'; return; }
+  $('#madd').disabled = true; $('#mres').textContent = now ? 'The model is writing it…' : 'Queuing…';
+  try {
+    const r = await post('/api/remember', { key, context, now });
+    const s = await r.json();
+    if (!r.ok) throw new Error(s.error);
+    $('#mres').textContent = s.status === 'stored' ? `Stored: ${s.key} is ${s.summary}` : `Queued as ${s.key}; it is learned at the next sleep.`;
+    $('#mkey').value = ''; $('#mctx').value = ''; loadMemories(); refreshQueue();
+  } catch (err) { $('#mres').textContent = 'Error: ' + err.message; }
+  finally { $('#madd').disabled = false; }
+}
+
+async function sleepNow() {
+  $('#sleepbtn').disabled = true; $('#sleeplog').textContent = 'Sleeping…';
+  const lines = [];
+  try {
+    await readStream(await post('/api/sleep', {}), e => {
+      if (e.type === 'wrote') lines.push(`learned ${e.key} is ${e.summary}`);
+      else if (e.type === 'failed') lines.push(`could not learn ${e.key}: ${e.reason}`);
+      else if (e.type === 'done') lines.push(`${e.stored} stored in ${e.seconds}s${e.left ? `, ${e.left} left` : ''}.`);
+      $('#sleeplog').textContent = lines.join('\n');
+    });
+  } catch (err) { lines.push('Error: ' + err.message); $('#sleeplog').textContent = lines.join('\n'); }
+  finally { loadMemories(); refreshQueue(); }
+}
+
+$('#ask').addEventListener('submit', send);
+$('#q').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) send(e); });
+$('#clear').onclick = () => { history = []; $('#log').replaceChildren(); $('#status').textContent = ''; };
+$('#stop').onclick = () => post('/api/stop', {});
+$('#mq').addEventListener('input', () => { clearTimeout(window._mq); window._mq = setTimeout(loadMemories, 200); });
+$('#upfile').addEventListener('change', uploadFile);
+$('#madd').onclick = remember;
+$('#sleepbtn').onclick = sleepNow;
+loadState().then(() => Promise.all([loadMemories(), refreshQueue()])).catch(err => { $('#meta').textContent = 'Could not reach the server: ' + err.message; });
+</script>
+</body>
+</html>

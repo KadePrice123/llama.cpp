@@ -1,0 +1,84 @@
+name: steermem-cli (CUDA, Windows)
+
+# Builds steermem/ (protocol mode, the auto menu, the saved menu index, auto-inject) for Windows with CUDA 12.4, the
+# same toolkit setup and compiler as llama.cpp's own Windows CUDA release, and publishes a release with the exe and
+# the CUDA runtime DLLs it needs.
+on:
+  workflow_dispatch:
+  push:
+    branches: [steermem]
+    paths:
+      - 'steermem/**'
+      - 'src/**'
+      - 'include/**'
+      - 'ggml/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/steermem-windows-cuda.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  windows-cuda:
+    name: steermem-cli windows-cuda (12.4, x64)
+    runs-on: windows-2022
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+
+      - name: Install Cuda Toolkit
+        uses: ./.github/actions/windows-setup-cuda
+        with:
+          cuda_version: '12.4'
+          cuda_arch: x64
+
+      - name: Install Ninja
+        run: choco install ninja
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.24
+        with:
+          key: steermem-windows-2022-x64-cuda-12.4
+
+      - name: Build
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release ^
+            -DGGML_NATIVE=OFF -DGGML_CUDA=ON -DGGML_CUDA_CUB_3DOT2=ON -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89" ^
+            -DBUILD_SHARED_LIBS=OFF -DLLAMA_BUILD_STEERMEM=ON ^
+            -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_SERVER=OFF
+          set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
+          cmake --build build --config Release -j %NINJA_JOBS% --target steermem-cli
+
+      - name: Pack
+        shell: pwsh
+        run: |
+          $dst = "steermem-cli-win-cuda-12.4-x64"
+          New-Item -ItemType Directory -Force $dst | Out-Null
+          $exe = Get-ChildItem -Recurse build -Filter steermem-cli.exe | Select-Object -First 1
+          if (-not $exe) { throw "steermem-cli.exe was not built" }
+          Copy-Item $exe.FullName $dst
+          foreach ($pat in "cudart64_*.dll", "cublas64_*.dll", "cublasLt64_*.dll") {
+            Get-ChildItem -Path "$env:CUDA_PATH\bin" -Filter $pat -File -ErrorAction SilentlyContinue | Copy-Item -Destination $dst
+          }
+          Copy-Item steermem\README.md $dst
+          Get-ChildItem $dst | Format-Table Name, Length
+          7z a "$dst.zip" ".\$dst\*"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: steermem-cli-win-cuda-12.4-x64
+          path: steermem-cli-win-cuda-12.4-x64.zip
+
+      - name: Release
+        shell: bash
+        run: |
+          tag="steermem-win-cuda-${GITHUB_SHA::7}"
+          gh release create "$tag" steermem-cli-win-cuda-12.4-x64.zip --target "$GITHUB_SHA" \
+            --title "steermem-cli for Windows, CUDA 12.4 (${GITHUB_SHA::7})" \
+            --notes "steermem-cli built from ${GITHUB_SHA} on the steermem branch: protocol mode, the auto menu and its saved index, auto-inject. The CUDA runtime DLLs are in the zip; the GPU needs an NVIDIA driver for CUDA 12.4 or newer. See steermem/README.md for the flags, and the steermem demo on Hugging Face for the GGUFs and tables."

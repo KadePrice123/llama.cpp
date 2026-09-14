@@ -253,6 +253,12 @@ endif()
 # Apple XCFramework, or a WASM build). When the full tools build is enabled,
 # mtmd is already built by the tools/ subdirectory above; this hook only fires
 # when LLAMA_BUILD_TOOLS is OFF to avoid double-adding the target.
+# steermem (fork edit 0022): the steermem-cli target, off by default
+option(LLAMA_BUILD_STEERMEM "llama: build steermem-cli (steermem/)" OFF)
+if (LLAMA_BUILD_STEERMEM)
+    add_subdirectory(steermem)
+endif()
+
 option(LLAMA_BUILD_MTMD "llama: build tools/mtmd library standalone" OFF)
 if (LLAMA_BUILD_MTMD AND NOT (LLAMA_BUILD_COMMON AND LLAMA_BUILD_TOOLS))
     add_subdirectory(tools/mtmd)

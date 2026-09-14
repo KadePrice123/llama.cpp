@@ -47,6 +47,7 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <set>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -57,6 +58,8 @@ using json = nlohmann::json;
 // ---------------------------------------------------------------- the table
 struct cell_t {
     std::string key, text, table;
+    std::string ctx;                               // 0016: text read before the row when its states are captured
+    std::string summary;                           // 0018: protocol mode's stored memory text ("KEY is SUMMARY")
     std::vector<std::string> aliases;              // other spellings that name this cell (the core cell: "core memories")
     std::vector<std::vector<llama_token>> forms;   // key token forms, 2+ tokens each
     // capture (filled on first use)
@@ -102,6 +105,9 @@ static std::vector<cell_t> load_table(const std::string & path) {
         auto take = [&](const json & o) {
             cell_t c; c.key = o.value("key", ""); c.text = o.contains("text") ? o.value("text", "") : o.value("content", "");
             c.table = o.value("table", path.substr(path.find_last_of("/\\") + 1));
+            c.ctx = o.value("context", "");     // 0016: a per-cell capture context
+            c.summary = o.value("summary", "");  // 0018: protocol mode's stored memory text
+            if (c.text.empty()) c.text = !c.summary.empty() ? c.summary : c.ctx;
             if (!c.key.empty() && !c.text.empty()) cells.push_back(c);
         };
         try {
@@ -122,8 +128,12 @@ struct side_t {
     float emb_norm = 0.0f;
     std::vector<int> layers;
     std::map<int, float> scale;
-    int mem_seq = 128, mem_seq_cells = 4, mem_gen = 0, memtok = 8, key_window = 96, egroup = 1, line_rule = 2;
-    std::vector<float> memtag, seqtag, exptag;     // [d], [64*d], [8*d]
+    int mem_seq = 128, mem_seq_cells = 4, mem_gen = 0, memtok = 8, key_window = 96, egroup = 1, line_rule = 2, mem_once = 0, key_min_chars = 0;
+    std::vector<float> memtag, seqtag, exptag, marktag;   // [d], [64*d], [8*d], [2*d]
+    int mem_marks = 0;                             // 0014: wrap every block in <|mem_start|> / <|mem_end|>
+    int protocol = 0, head = 1, keyemb_on = 1, span_key = 0, step = 0;   // 0018: a twoside.py checkpoint (the <recall> loop)
+    std::vector<float> nulltag, neartag;                                  // 0018: [d], [d]
+    std::map<int, std::vector<float>> nullrec;                            // 0018: layer -> [d]
 };
 
 static side_t load_side(const std::string & path) {
@@ -137,6 +147,9 @@ static side_t load_side(const std::string & path) {
     s.emb_norm = f32("steermem.emb_norm", 0.0f);
     s.mem_seq = u32("steermem.mem_seq", 128); s.mem_seq_cells = u32("steermem.mem_seq_cells", 4);
     s.mem_gen = u32("steermem.mem_gen", 0); s.memtok = u32("steermem.memtok", 8);
+    s.mem_once = u32("steermem.mem_once", 0);          // 0012: one block per cell per turn (trainer patch 87)
+    s.mem_marks = u32("steermem.mem_marks", 0);        // 0014: the block is wrapped in two learned marker positions (trainer patch 91)
+    s.key_min_chars = u32("steermem.key_min_chars", 0); // 0013: a one-token key form counts when the name has N+ alphanumerics (trainer patch 88)
     s.key_window = u32("steermem.key_window", 96); s.egroup = u32("steermem.egroup", 1);
     s.line_rule = u32("steermem.line_rule", 2);   // absent: a checkpoint from before trainer patch 79
     int64_t li = gguf_find_key(g, "steermem.layers");
@@ -153,7 +166,24 @@ static side_t load_side(const std::string & path) {
         return v;
     };
     s.memtag = tensor("memtag"); s.d = (int) s.memtag.size();
-    s.seqtag = tensor("seqtag"); s.exptag = tensor("exptag");
+    s.protocol = u32("steermem.protocol", 0);            // 0018
+    s.head = u32("steermem.head", 1); s.keyemb_on = u32("steermem.keyemb", 1);
+    s.span_key = u32("steermem.span_from_key", 0); s.step = u32("steermem.step", 0);
+    s.seqtag = tensor("seqtag");
+    if (!s.protocol) {
+        s.exptag = tensor("exptag");
+    } else {
+        s.nulltag = tensor("nulltag"); s.neartag = tensor("neartag");
+        for (int l : s.layers) s.nullrec[l] = tensor(("nullrec." + std::to_string(l)).c_str());
+        ggml_tensor * mt = ggml_get_tensor(gctx, "marktag");
+        if (mt && (int) ggml_nelements(mt) == 2 * s.d) { s.marktag.resize(2 * s.d); memcpy(s.marktag.data(), mt->data, s.marktag.size() * sizeof(float)); }
+        else s.mem_marks = 0;
+    }
+    if (s.mem_marks) {                                  // 0014: the marker vectors, or serve unmarked if the file predates them
+        ggml_tensor * mt = ggml_get_tensor(gctx, "marktag");
+        if (!mt || (int) ggml_nelements(mt) != 2 * s.d) { fprintf(stderr, "side gguf says mem_marks but lacks marktag [2,d]; serving unmarked\n"); s.mem_marks = 0; }
+        else { s.marktag.resize(2 * s.d); memcpy(s.marktag.data(), mt->data, s.marktag.size() * sizeof(float)); }
+    }
     gguf_free(g); ggml_free(gctx);
     return s;
 }
@@ -186,6 +216,8 @@ static bool cb_capture(ggml_tensor * t, bool ask, void * ud) {
 
 // ---------------------------------------------------------------- the engine
 struct engine_t {
+    int ngl = 0;                                   // 0015: layers offloaded to the GPU, for the info line
+    std::string cell_ctx;                          // 0016: --cell-context, used for cells that carry none of their own
     llama_model * model = nullptr;
     llama_context * ctx = nullptr;      // the conversation
     llama_context * cap = nullptr;      // captures (adapter off), its own kv
@@ -228,6 +260,7 @@ struct engine_t {
     // a table swap: the cells are replaced; captures are recomputed lazily on first use
     void set_table(std::vector<cell_t> cells_) {
         cells = std::move(cells_);
+        if (side.protocol) return;                     // 0018: protocol mode looks keys up by the tag the model writes: no core/index cells, no key forms
         add_core_cell(cells);
         for (auto & c : cells) prep_forms(c);
     }
@@ -240,7 +273,11 @@ struct engine_t {
         c.forms.clear();
         std::vector<std::string> names = { c.key };
         names.insert(names.end(), c.aliases.begin(), c.aliases.end());
-        for (auto & nm : names) for (auto & f : { tok(" " + nm, false), tok(nm, false) }) if (f.size() >= 2) c.forms.push_back(f);
+        for (auto & nm : names) {
+            int an = 0; for (unsigned char ch : nm) if (std::isalnum(ch)) ++an;     // 0013: one-token forms of a name with key_min_chars+ alphanumerics count
+            for (auto & f : { tok(" " + nm, false), tok(nm, false) })
+                if (f.size() >= 2 || (f.size() == 1 && side.key_min_chars > 0 && an >= side.key_min_chars)) c.forms.push_back(f);
+        }
     }
     // THE CORE CELL (19:20): what the trainer's items always carry -- "Core memory. Memory tables
     // available: A; B; C." under the key "core memory" (and "core memories", the phrase the think
@@ -289,9 +326,13 @@ struct engine_t {
     void capture(cell_t & c) {
         if (c.captured) return;
         std::string row = "<cell: " + c.key + " | " + c.table + ">\n" + c.text + "\n</cell>";
-        c.ids = tok(row, true);
+        const std::string & ctx = c.ctx.empty() ? cell_ctx : c.ctx;      // 0016: read before the row, kept out of the block
+        c.ids = tok(row, true);                                          // 0016: tok()'s flag is parse-special, not add-bos -- the row must tokenise identically with and without a context, or the A/B is not the same block
         if (c.ids.size() > 512) c.ids.resize(512);
         const int n = (int) c.ids.size();
+        std::vector<llama_token> pre;
+        if (!ctx.empty()) pre = tok(ctx + "\n", true);
+        const int np = (int) pre.size();
         // the line span [l0, l1). Rule 2 (the trainer today): after the second newline-bearing token to the
         // end -- for a one-line cell that is "</cell>" alone. Rule 1: from after the header's newline through
         // the closing tag's newline-bearing token, i.e. the content.
@@ -311,15 +352,16 @@ struct engine_t {
         llama_memory_clear(llama_get_memory(cap), true);
         capd.want.clear(); capd.got.clear();
         for (int l : side.layers) capd.want.push_back("l_out-" + std::to_string(l));
-        llama_batch b = llama_batch_init(n, 0, 1);
-        for (int i = 0; i < n; ++i) { b.token[i] = c.ids[i]; b.pos[i] = i; b.n_seq_id[i] = 1; b.seq_id[i][0] = 0; b.logits[i] = 0; }
-        b.n_tokens = n;
+        llama_batch b = llama_batch_init(np + n, 0, 1);
+        for (int i = 0; i < np; ++i) { b.token[i] = pre[i]; b.pos[i] = i; b.n_seq_id[i] = 1; b.seq_id[i][0] = 0; b.logits[i] = 0; }
+        for (int i = 0; i < n; ++i) { b.token[np + i] = c.ids[i]; b.pos[np + i] = np + i; b.n_seq_id[np + i] = 1; b.seq_id[np + i][0] = 0; b.logits[np + i] = 0; }
+        b.n_tokens = np + n;
         if (llama_decode(cap, b) != 0) { fprintf(stderr, "capture decode failed\n"); exit(2); }
         llama_batch_free(b);
         for (int l : side.layers) {
             auto & v = capd.got["l_out-" + std::to_string(l)];
-            if ((int64_t) v.size() != (int64_t) n * d) { fprintf(stderr, "capture of l_out-%d has %zu floats, expected %d x %d\n", l, v.size(), n, d); exit(2); }
-            c.st[l] = v;                                           // [n * d], token-major
+            if ((int64_t) v.size() != (int64_t) (np + n) * d) { fprintf(stderr, "capture of l_out-%d has %zu floats, expected %d x %d\n", l, v.size(), np + n, d); exit(2); }
+            c.st[l].assign(v.begin() + (size_t) np * d, v.end());  // 0016: the ROW's positions only; the context is read, not delivered
         }
         // the key's mean input embedding (the first key form)
         c.keyemb.assign(d, 0.0f);
@@ -345,14 +387,16 @@ struct engine_t {
         capture(c);
         const int n = (int) c.ids.size();
         const int nb = std::min(side.mem_seq, n);
-        block_t b; b.n = 1 + nb;
+        const int mk = side.mem_marks ? 1 : 0;          // 0014: a marker row before the head and after the last body
+        block_t b; b.n = 1 + nb + 2 * mk;
         b.vec.assign((size_t) b.n * d, 0.0f);
         for (int l : side.layers) b.rec[l].assign((size_t) b.n * d, 0.0f);
         auto row = [&](int k) { return b.vec.data() + (size_t) k * d; };
-        // head
-        for (int j = 0; j < d; ++j) row(0)[j] = side.memtag[j] + side.seqtag[j] + side.exptag[(size_t) side.egroup * d + j] + c.keyemb[j];
+        // <|mem_start|> / head / ... / <|mem_end|>
+        if (mk) for (int j = 0; j < d; ++j) row(0)[j] = side.marktag[j];
+        for (int j = 0; j < d; ++j) row(mk)[j] = side.memtag[j] + side.seqtag[j] + side.exptag[(size_t) side.egroup * d + j] + c.keyemb[j];
         for (int l : side.layers) {
-            float * r = b.rec[l].data();
+            float * r = b.rec[l].data() + (size_t) mk * d;
             const float * st = c.st[l].data();
             const int e1 = std::max(c.l0 + 1, std::min(n, c.l1));
             const int span = e1 - c.l0;
@@ -362,9 +406,10 @@ struct engine_t {
         for (int k = 0; k < nb; ++k) {
             const int pj = nb > 1 ? (int) std::lround((double) k * (n - 1) / (double) (nb - 1)) : n - 1;
             const int code = 1 + std::min(k, 61);
-            for (int j = 0; j < d; ++j) row(1 + k)[j] = side.memtag[j] + side.seqtag[(size_t) code * d + j];
-            for (int l : side.layers) memcpy(b.rec[l].data() + (size_t) (1 + k) * d, c.st[l].data() + (size_t) pj * d, d * sizeof(float));
+            for (int j = 0; j < d; ++j) row(mk + 1 + k)[j] = side.memtag[j] + side.seqtag[(size_t) code * d + j];
+            for (int l : side.layers) memcpy(b.rec[l].data() + (size_t) (mk + 1 + k) * d, c.st[l].data() + (size_t) pj * d, d * sizeof(float));
         }
+        if (mk) for (int j = 0; j < d; ++j) row(b.n - 1)[j] = side.marktag[d + j];   // <|mem_end|>
         // every vec row to emb_norm; every rec row to unit length (build_inject scales by the residual norm)
         for (int k = 0; k < b.n; ++k) {
             float nv = 0; for (int j = 0; j < d; ++j) nv += row(k)[j] * row(k)[j];
@@ -463,6 +508,8 @@ struct engine_t {
 };
 
 
+#include "steermem_protocol.hpp"                  // 0018: protocol mode
+
 // ---------------------------------------------------------------- one prompt, start to finish
 struct run_result_t { json summary; json start; };
 
@@ -484,7 +531,22 @@ static run_result_t run_prompt(engine_t & E, const std::string & prompt, int max
     }
     std::sort(hits.begin(), hits.end(), [](const hit_t & a, const hit_t & b) { return a.end < b.end; });
     hits.erase(std::unique(hits.begin(), hits.end(), [](const hit_t & a, const hit_t & b) { return a.end == b.end && a.c == b.c; }), hits.end());
-    if ((int) hits.size() > E.side.mem_seq_cells) {
+    if (E.side.mem_once) {
+        // ONE BLOCK PER CELL PER TURN (0012; Kade 2026-09-12 20:30). Turns are the <|im_start|> segments of the
+        // prompt: the first mention of a cell in a turn delivers its block, later mentions in that turn deliver
+        // nothing, at most mem_seq_cells cells per turn. The trainer's _seed_hits (patch 87) applies the same rule.
+        const std::vector<llama_token> im = E.tok("<|im_start|>", true);
+        const llama_token im_start = im.size() == 1 ? im[0] : -1;
+        std::vector<int> starts; for (int i = 0; i < (int) seed.size(); ++i) if (im_start >= 0 && seed[i] == im_start) starts.push_back(i);
+        std::vector<hit_t> kept; std::set<std::pair<int, cell_t *>> seen; std::map<int, int> per;
+        for (auto & h : hits) {
+            int seg = 0; for (int st : starts) if (st < h.end) ++seg;
+            if (seen.count({ seg, h.c })) continue;
+            if (E.side.mem_seq_cells > 0 && per[seg] >= E.side.mem_seq_cells) continue;
+            seen.insert({ seg, h.c }); ++per[seg]; kept.push_back(h);
+        }
+        hits.swap(kept);
+    } else if ((int) hits.size() > E.side.mem_seq_cells) {
         if (E.side.mem_gen) hits.resize(E.side.mem_seq_cells);
         else hits.erase(hits.begin(), hits.end() - E.side.mem_seq_cells);
     }
@@ -510,6 +572,7 @@ static run_result_t run_prompt(engine_t & E, const std::string & prompt, int max
     std::string out;
     json fired_log = json::array();
     int blocks_fired = 0, n_tok = 0;
+    std::set<cell_t *> seen_turn;                  // 0012: the cells delivered in this turn of the model's own
     bool stopped = false;
     const int n_vocab = llama_vocab_n_tokens(E.vocab);
     for (int step = 0; step < max_new; ++step) {
@@ -526,6 +589,11 @@ static run_result_t run_prompt(engine_t & E, const std::string & prompt, int max
         std::vector<cell_t *> fired;
         if (E.side.mem_gen && (pc.empty() || !std::isalnum((unsigned char) pc[0]))) fired = E.key_end(all);
         if (blocks_fired >= E.side.mem_seq_cells * 8) fired.clear();   // the trainer's cap on blocks fired in one generation (MEMGEN_N < mem_seq_cells * 8)
+        if (E.side.mem_once && !fired.empty()) {   // 0012: a cell already delivered in this turn fires nothing more; at most mem_seq_cells cells
+            std::vector<cell_t *> fresh;
+            for (auto * c : fired) if (!seen_turn.count(c) && (E.side.mem_seq_cells <= 0 || (int) seen_turn.size() < E.side.mem_seq_cells)) { seen_turn.insert(c); fresh.push_back(c); }
+            fired.swap(fresh);
+        }
         if (!fired.empty()) {
             json keys = json::array(); for (auto * c : fired) keys.push_back(c->key);
             fired_log.push_back({ { "at_text_token", (int) E.text.size() }, { "keys", keys } });
@@ -638,9 +706,10 @@ static int serve(engine_t & E, const std::string & host, int port, const std::st
     std::mutex mu;
     std::atomic<bool> stop_flag{ false };
     auto send_json = [](httplib::Response & res, const json & j, int status = 200) { res.status = status; res.set_content(j.dump(), "application/json"); };
+    if (E.side.protocol) register_protocol_routes(srv, E, mu, stop_flag, model_name);   // 0018: registered first, so "/" is the protocol page
     srv.Get("/", [&](const httplib::Request &, httplib::Response & res) {
         json j = { { "presets", list_presets(tables_dir) }, { "cells", (int) E.cells.size() }, { "mem_seq", E.side.mem_seq }, { "mem_gen", E.side.mem_gen },
-                   { "mem_seq_cells", E.side.mem_seq_cells }, { "memtok", E.side.memtok }, { "line_rule", E.line_rule }, { "model", model_name }, { "engine", "steermem-cli (llama.cpp fork)" } };
+                   { "mem_seq_cells", E.side.mem_seq_cells }, { "mem_once", E.side.mem_once }, { "mem_marks", E.side.mem_marks }, { "ngl", E.ngl }, { "cell_context", (int) E.cell_ctx.size() }, { "key_min_chars", E.side.key_min_chars }, { "memtok", E.side.memtok }, { "line_rule", E.line_rule }, { "model", model_name }, { "engine", "steermem-cli (llama.cpp fork)" } };
         send_json(res, j);
     });
     srv.Get("/ui", [&](const httplib::Request &, httplib::Response & res) { res.set_content(UI_HTML, "text/html; charset=utf-8"); });
@@ -653,6 +722,31 @@ static int serve(engine_t & E, const std::string & host, int port, const std::st
         E.set_table(load_table(path));
         send_json(res, { { "loaded", (int) E.cells.size() }, { "name", name } });
     });
+    srv.Post("/cellvec", [&](const httplib::Request & req, httplib::Response & res) {   // 0017
+        std::string key; try { key = json::parse(req.body).value("key", ""); } catch (...) {}
+        std::lock_guard<std::mutex> lk(mu);
+        cell_t * c = nullptr;
+        for (auto & x : E.cells) if (x.key == key) { c = &x; break; }
+        if (!c) { send_json(res, { { "error", "no such cell" } }, 404); return; }
+        auto b = E.block(*c);                              // exactly what a delivered block carries
+        const int d = E.d, mk = E.side.mem_marks ? 1 : 0;
+        json out = { { "key", c->key }, { "table", c->table }, { "context_chars", (int) (c->ctx.empty() ? E.cell_ctx.size() : c->ctx.size()) },
+                     { "row_tokens", (int) c->ids.size() }, { "l0", c->l0 }, { "l1", c->l1 }, { "block_rows", b.n },
+                     { "layers", json::object() } };
+        const int nb = b.n - 1 - 2 * mk;                    // body rows
+        std::vector<std::pair<std::string, int>> want = { { "head", mk }, { "body0", mk + 1 },
+                                                          { "bodymid", mk + 1 + nb / 2 }, { "bodylast", mk + nb } };
+        for (int l : E.side.layers) {
+            json rows = json::object();
+            for (auto & w : want) {
+                if (w.second < 0 || w.second >= b.n) continue;
+                const float * r = b.rec[l].data() + (size_t) w.second * d;
+                rows[w.first] = std::vector<float>(r, r + d);
+            }
+            out["layers"][std::to_string(l)] = rows;
+        }
+        send_json(res, out);
+    });
     srv.Post("/table", [&](const httplib::Request & req, httplib::Response & res) {
         json body; try { body = json::parse(req.body); } catch (...) { send_json(res, { { "error", "bad json" } }, 400); return; }
         std::string name = body.value("name", "upload");
@@ -664,7 +758,7 @@ static int serve(engine_t & E, const std::string & host, int port, const std::st
             for (auto & c : cells) if (c.table == "steermem_upload.csv") c.table = name;
         } else if (body.contains("cells")) {
             for (auto & o : body["cells"]) {
-                cell_t c; c.key = o.value("key", ""); c.text = o.contains("text") ? o.value("text", "") : o.value("content", ""); c.table = o.value("table", name);
+                cell_t c; c.key = o.value("key", ""); c.text = o.contains("text") ? o.value("text", "") : o.value("content", ""); c.table = o.value("table", name); c.ctx = o.value("context", "");   // 0016
                 if (!c.key.empty() && !c.text.empty()) cells.push_back(c);
             }
         }
@@ -719,7 +813,12 @@ static int serve(engine_t & E, const std::string & host, int port, const std::st
 
 int main(int argc, char ** argv) {
     std::string model_path, lora_path, side_path, table_path, prompt, tables_dir, host = "127.0.0.1";
-    int max_new = 64, threads = 6, memgen = -1, n_ctx = 4096, line_rule = 0, port = 0;   // line_rule 0: follow the side file
+    int max_new = 64, threads = 6, memgen = -1, n_ctx = 4096, line_rule = 0, port = 0, mem_once = -1, key_min_chars = -1, mem_marks = -1, ngl = 0;   // line_rule 0 / mem_once -1 / key_min_chars -1: follow the side file
+    std::string cell_ctx;                          // 0016: read before every row at capture time
+    std::string tool_docs, lookup_path, examples_path, ui_path, memory_out, remember_mode = "store", system_prompt;   // 0018
+    std::vector<std::string> learn;                                                                                  // 0018
+    bool chat_repl = false, sleep_at_start = false, sleep_only = false;                                              // 0018
+    std::string menu_cache;                                                                                          // 0020
     bool no_traces = false, quiet = false;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -729,12 +828,35 @@ int main(int argc, char ** argv) {
         else if (a == "--threads") threads = atoi(next().c_str()); else if (a == "--memgen") memgen = atoi(next().c_str());
         else if (a == "--no-traces") no_traces = true; else if (a == "--quiet") quiet = true; else if (a == "--ctx") n_ctx = atoi(next().c_str());
         else if (a == "--line-rule") line_rule = atoi(next().c_str());
+        else if (a == "--mem-once") mem_once = atoi(next().c_str());
+        else if (a == "--key-min-chars") key_min_chars = atoi(next().c_str());
+        else if (a == "--mem-marks") mem_marks = atoi(next().c_str());
+        else if (a == "-ngl" || a == "--n-gpu-layers") ngl = atoi(next().c_str());
+        else if (a == "--cell-context") cell_ctx = next();
+        else if (a == "--tool-docs") tool_docs = next(); else if (a == "--lookup") lookup_path = next();          // 0018
+        else if (a == "--examples") examples_path = next(); else if (a == "--ui") ui_path = next();
+        else if (a == "--memory-out") memory_out = next(); else if (a == "--learn") learn.push_back(next());
+        else if (a == "--remember-mode") remember_mode = next(); else if (a == "--files-dir") PROTO.files_dir = next();
+        else if (a == "--system") system_prompt = next();
+        else if (a == "--auto-menu") MENU.k = atoi(next().c_str()); else if (a == "--menu-layer") MENU.layer = atoi(next().c_str());   // 0019
+        else if (a == "--menu-cache") menu_cache = next();                                                           // 0020
+        else if (a == "--auto-inject") INJECT.rows = atoi(next().c_str()); else if (a == "--inject-max") INJECT.max = atoi(next().c_str());   // 0021
+        else if (a == "--inject-surprise") INJECT.surprise = atof(next().c_str()); else if (a == "--inject-min-score") INJECT.min_score = atof(next().c_str());
+        else if (a == "--inject-match") { INJECT.match = next(); if (INJECT.match != "key" && INJECT.match != "state") { fprintf(stderr, "--inject-match takes key or state\n"); return 1; } }
+        else if (a == "--chat") chat_repl = true; else if (a == "--sleep-at-start") sleep_at_start = true; else if (a == "--sleep-only") sleep_only = true;
         else if (a == "--serve") port = atoi(next().c_str()); else if (a == "--tables") tables_dir = next(); else if (a == "--host") host = next();
         else { fprintf(stderr, "unknown arg %s\n", a.c_str()); return 1; }
     }
-    if (model_path.empty() || side_path.empty() || (port == 0 && (table_path.empty() || prompt.empty()))) {
+    if (model_path.empty() || side_path.empty() || (port == 0 && !chat_repl && !sleep_only && (table_path.empty() || prompt.empty()))) {
         fprintf(stderr, "usage: steermem-cli --model BASE.gguf [--lora ADAPTER.gguf] --side SIDE.gguf --table T --prompt P [--max-new N] [--memgen 0|1] [--line-rule 1|2] [--no-traces]\n"
-                        "       steermem-cli --model BASE.gguf [--lora ADAPTER.gguf] --side SIDE.gguf --serve PORT [--tables DIR] [--table T] [--host 0.0.0.0]   (then open http://127.0.0.1:PORT/ui)\n");
+                        "       steermem-cli --model BASE.gguf [--lora ADAPTER.gguf] --side SIDE.gguf --serve PORT [--tables DIR] [--table T] [--host 0.0.0.0]   (then open http://127.0.0.1:PORT/ui)\n"
+                        "  protocol mode (a side file from twoside_export.py):\n"
+                        "       steermem-cli --model BASE.gguf --lora ADAPTER.gguf --side SIDE.gguf [--table memories.jsonl] [--memory-out learned.jsonl]\n"
+                        "           [--tool-docs tool_docs.jsonl] [--lookup lookup.jsonl] [--examples examples.json] [--learn FILE ...] [--remember-mode store|queue]\n"
+                        "           --chat | --serve PORT --ui demo_ui.html | --sleep-only | --prompt TEXT   [--sleep-at-start] [--system TEXT] [-ngl N]\n"
+                        "           [--auto-menu K] [--menu-layer L]   (0019: put the K memories a message brings to mind in the system prompt)\n"
+                        "           [--menu-cache FILE|none]   (0020: where that index is saved; default the --memory-out file + .menu)\n"
+                        "           [--auto-inject N] [--inject-max K] [--inject-surprise T] [--inject-match key|state] [--inject-min-score S]   (0021: memory after surprising words)\n");
         return 1;
     }
     for (size_t p; (p = prompt.find("\\n")) != std::string::npos;) prompt.replace(p, 2, "\n");   // literal \n in the prompt argument
@@ -744,9 +866,14 @@ int main(int argc, char ** argv) {
     engine_t E;
     E.side = load_side(side_path);
     E.line_rule = line_rule > 0 ? line_rule : E.side.line_rule;
+    if (mem_once >= 0) E.side.mem_once = mem_once;       // 0012: the command line overrides the side file
+    if (key_min_chars >= 0) E.side.key_min_chars = key_min_chars;   // 0013: the command line overrides the side file
+    if (mem_marks >= 0) E.side.mem_marks = (mem_marks && !E.side.marktag.empty()) ? 1 : 0;   // 0014: only if the file carries the vectors
     if (memgen >= 0) E.side.mem_gen = memgen;
     if (no_traces) E.side.memtok = 0;
-    llama_model_params mp = llama_model_default_params(); mp.n_gpu_layers = 0;
+    E.ngl = ngl;
+    E.cell_ctx = cell_ctx;                        // 0016
+    llama_model_params mp = llama_model_default_params(); mp.n_gpu_layers = ngl;   // 0015: -ngl N puts N layers on the GPU (CUDA/SYCL builds; 0 = CPU, the old behaviour)
     E.model = llama_model_load_from_file(model_path.c_str(), mp);
     if (!E.model) { fprintf(stderr, "model failed\n"); return 2; }
     E.d = llama_model_n_embd(E.model);
@@ -758,6 +885,7 @@ int main(int argc, char ** argv) {
     cp.n_ctx = n_ctx; cp.n_batch = 1024; cp.n_ubatch = 1024; cp.n_threads = threads; cp.n_threads_batch = threads;
     E.ctx = llama_init_from_model(E.model, cp);
     llama_context_params cc = cp; cc.n_ctx = 1024; cc.cb_eval = cb_capture; cc.cb_eval_user_data = &E.capd;
+    if (E.side.protocol) { cc.n_ctx = 2048; cc.n_batch = 2048; cc.n_ubatch = 2048; }   // 0018: a capture must be one ubatch
     E.cap = llama_init_from_model(E.model, cc);
     if (!E.ctx || !E.cap) { fprintf(stderr, "context failed\n"); return 2; }
     if (!lora_path.empty()) {
@@ -766,6 +894,32 @@ int main(int argc, char ** argv) {
         float one = 1.0f; llama_set_adapters_lora(E.ctx, &E.lora, 1, &one);
     }
     if (!table_path.empty()) E.set_table(load_table(table_path));
+    if (E.side.protocol) {                                // 0018
+        PROTO.memory_out = memory_out;
+        {                                                 // 0020: the saved menu index, and what must match to reuse it
+            auto fsize = [](const std::string & path) { std::error_code ec; const auto n = path.empty() ? 0 : std::filesystem::file_size(path, ec); return ec ? 0ULL : (unsigned long long) n; };
+            MENU.cache_path = menu_cache == "none" ? std::string() : (!menu_cache.empty() ? menu_cache : (memory_out.empty() ? std::string() : memory_out + ".menu"));
+            MENU.fingerprint = "steermem-menu layer=" + std::to_string(MENU.layer) + " d=" + std::to_string(E.d) + " step=" + std::to_string(E.side.step) +
+                               " model=" + std::to_string(fsize(model_path)) + " lora=" + std::to_string(fsize(lora_path)) + " side=" + std::to_string(fsize(side_path));
+        }
+        PROTO.remember_mode = remember_mode == "queue" ? "queue" : "store";
+        proto_load_files(tool_docs, lookup_path, examples_path, ui_path);
+        if (!memory_out.empty() && std::filesystem::exists(memory_out)) { auto more = load_table(memory_out); E.cells.insert(E.cells.end(), more.begin(), more.end()); }
+        for (auto & path : learn) {
+            const std::string name = path.substr(path.find_last_of("/\\") + 1);
+            try { json r = proto_learn(E, name, proto_read_file(path), ""); fprintf(stderr, "learn %s: %d queued, %d stored, %d skipped\n", path.c_str(), r["queued"].get<int>(), r["stored"].get<int>(), r["skipped"].get<int>()); }
+            catch (const std::exception & e) { fprintf(stderr, "learn %s: %s\n", path.c_str(), e.what()); }
+        }
+        if (sleep_at_start || sleep_only) proto_sleep(E, 0, [](const json & ev) { proto_print_event(ev); return true; }, nullptr);
+        if (sleep_only) { llama_free(E.ctx); llama_free(E.cap); llama_model_free(E.model); llama_backend_free(); return 0; }
+        if (MENU.k > 0 || (INJECT.rows > 0 && INJECT.match == "state")) proto_menu_build(E);          // 0019: every memory's states at the menu layer
+        if (!quiet) fprintf(stderr, "protocol mode | checkpoint step %d | %zu memories, %zu queued | %zu tool manuals, %zu lookup entries | remember %s\n",
+                            E.side.step, E.cells.size(), PROTO.queue.size(), PROTO.docs.size(), PROTO.lookup.size(), PROTO.remember_mode.c_str());
+        if (chat_repl) {
+            const std::string mname = model_path.substr(model_path.find_last_of("/\\") + 1);
+            return run_chat_repl(E, max_new > 64 ? max_new : 700, system_prompt, mname);
+        }
+    }
     if (!quiet) fprintf(stderr, "table %zu cells | mem_seq %d cells %d mem_gen %d memtok %d window %d line_rule %d | scale %s\n", E.cells.size(), E.side.mem_seq, E.side.mem_seq_cells, E.side.mem_gen, E.side.memtok, E.side.key_window, E.line_rule, std::to_string(E.side.scale.begin()->second).c_str());
 
     if (port > 0) {
@@ -773,8 +927,17 @@ int main(int argc, char ** argv) {
         if (!lora_path.empty()) mname += " + " + lora_path.substr(lora_path.find_last_of("/\\") + 1);
         return serve(E, host, port, tables_dir, mname, quiet);
     }
-    auto r = run_prompt(E, prompt, max_new, quiet, nullptr, nullptr);
-    printf("%s\n", r.summary.dump().c_str());
+    if (E.side.protocol) {                                // 0018: one question through the protocol loop
+        json msgs = json::array({ { { "role", "user" }, { "content", prompt } } });
+        auto printer = [](const json & ev) { proto_print_event(ev); return true; };
+        const std::string sys = proto_apply_menu(E, system_prompt, prompt, MENU.k, printer);   // 0019
+        std::vector<proto_inject_t> injects = proto_plan_injects(E, prompt, INJECT.rows, printer);   // 0021
+        json done = run_protocol(E, proto_chat_prompt(msgs, sys), prompt, max_new > 64 ? max_new : 700, printer, nullptr, &injects);
+        printf("%s\n", proto_dump(done).c_str());
+    } else {
+        auto r = run_prompt(E, prompt, max_new, quiet, nullptr, nullptr);
+        printf("%s\n", r.summary.dump().c_str());
+    }
     llama_free(E.ctx); llama_free(E.cap); llama_model_free(E.model); llama_backend_free();
     return 0;
 }
